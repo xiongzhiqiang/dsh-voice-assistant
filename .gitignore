@@ -1,0 +1,34 @@
+# ── 运行时凭据（绝不能入库）──────────────────────────────
+# 当前实例 pid / port / token / URL。token 一旦入库等于泄露。
+tools/_dsh-serve.json
+
+# ── 启动日志（正文中含 token，且按 mtime 取最新）──────────
+tools/_dsh-*.log
+tools/_dsh-*.err
+tools/_dsh-*.log.*
+tools/_dsh-live.*
+tools/_dsh-run*
+
+# ── 调试截图 ─────────────────────────────────────────────
+tools/_*.png
+
+# ── 临时产物（均可由脚本重建）────────────────────────────
+# probe-user-questions.mjs 生成的 bundle 副本，供 Grep 精查
+_probe-bundle.js
+tools/_spike.txt
+tools/research/_scan.txt
+
+# ── 配置备份（含历史配置，非源码）─────────────────────────
+*.bak
+*.bak-*
+*.tmp
+*.tmp-test
+
+# ── 依赖 / 系统文件 ──────────────────────────────────────
+node_modules/
+Thumbs.db
+desktop.ini
+
+# 注意：以下文件**必须入库**，不要误加排除：
+#   lib/client.js            —— 构建产物，但 package.json "./client" 指向它，运行时必需
+#   tools/_silence-60s.wav   —— 4 个 smoke 脚本的假麦克风夹具，删了测试会挂
