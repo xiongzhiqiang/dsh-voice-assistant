@@ -16,6 +16,7 @@ tools/_*.png
 # probe-user-questions.mjs 生成的 bundle 副本，供 Grep 精查
 _probe-bundle.js
 tools/_spike.txt
+tools/_*.txt
 tools/research/_scan.txt
 
 # ── 配置备份（含历史配置，非源码）─────────────────────────
