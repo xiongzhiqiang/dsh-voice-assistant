@@ -1244,6 +1244,35 @@ bundle 都是 `SPEAKING --speak-end--> ACTIVE`（正在听），播完 14 秒仍
 120s 在两层架构下不够（静音 10s + 路由 1–2s + 专家真实执行几十秒 + 60s 空闲），
 放宽到 180s。这类"上界魔法数"在链路里加环节时必须重新预算。
 
+**坑十三：`registry.create()` 的 agent 不带 preset —— 没有文件/命令工具。**
+
+（2026-11-17，用户真机测试"分配编程任务给编码 agent"暴露的连环坑）
+
+**① profile 的 bundle 清单会被"顺手"改丢。** V1.0 回滚 dsh-ears 时连续改
+`profiles/web/package.json`，把 `agent-team-profile`（任务板工具的来源）、
+`dsh-memento`、`voice-input-bundle`、`whale-girl` 四个 bundle 一并弄丢 ——
+症状是"任务板工具还是坏的，新建任务直接报错"（agent 上下文里仍注入着
+Team Lead 指令，但工具目录里没有 `team_task_create` → `unknown tool`）。
+判法：扫**会话日志的 `request/header` 工具集时间线**（`tools` 数组从 10 个
+塌缩到 1 个的时间点，正好对上 profile 改动时刻）。修法：恢复 bundle 清单
+（bundle 不在 profile dependencies 里也行 —— dsh 会从安装本体解析）；
+`dsh plugin add` 会触发 pnpm 重装，**注意 `link:` 依赖的相对路径层数**
+（`profiles/web` 到项目根是三层 `../../../`，写错四层平时不炸、重装时炸）。
+
+**② `registry.create()` 建的 agent 没有任何 preset。** web 界面会话有
+bash/fs 工具，是因为 session-controller 在 create/resume 的 setup 里调了
+`agentPresets.resolve()` + `mount(agentCtx, id)` —— **preset 才是工具集的
+来源**。本插件此前没走这一步，编程专家「阿码」只有 `working_directory`，
+写不了文件跑不了命令（它自己在会话里说"没有写入文件的工具"）。
+修法：`lib/agent.js` 的 `mountAgentPreset()`（官方同款路径，setup 回调被
+agent-loop `await`，允许 async）+ 配置项 `agent.preset`（默认 `standard`，
+写 `none` 关闭）。挂载失败**可见降级**进 health（`preset` 字段）。
+
+**③ 浏览器页面停在旧版客户端 bundle 上时，路由整体不生效。** DSH 实例重启
+后旧页面不一定重载 JS——症状是"说分配任务给编码 agent，话却原文落进根会话"。
+排障第一步永远是让用户**硬刷新页面**；服务端 `/api/route` 回放可以先把
+"路由器本身坏没坏"与"客户端接没接上"分开。
+
 ---
 
 ## 八、已知边界
@@ -1295,7 +1324,7 @@ bundle 都是 `SPEAKING --speak-end--> ACTIVE`（正在听），播完 14 秒仍
 index.js                    宿主半入口：配置归一化、配置下发、API 路由、常驻 agent、标注、全局记忆、归档自愈接线
 lib/config.js               配置归一化 + 客户端白名单裁剪（含 turn 的夹取与语义保护）
 lib/identity.js             宿主半身份：常驻会话可见性标注 + 全局记忆注册 + **归档自愈**（含「隐藏不可行」证伪表）
-lib/agent.js                常驻 agent：模型路由解析/落盘、人格段、生命周期
+lib/agent.js                常驻 agent：模型路由解析/落盘、人格段、**preset 挂载（mountAgentPreset）**、生命周期
 lib/workers.js              worker 专家层：默认四位专家、归一化、批量建立（复用 ensurePersistentAgent；标注+归档自愈与根 agent 一致）
 lib/router.js               意图路由（两层第一层）：LLM 意图分类 + 任务改写；严格 JSON + 白名单 + general 兜底
 lib/polish.js               转录润色（llm.stream）+ 跑偏检测 + 规则兜底

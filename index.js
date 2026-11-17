@@ -80,6 +80,11 @@ export function apply(ctx, config = {}) {
 	 * 为假时恒为空数组 = 两层架构关闭）。
 	 */
 	let workersStatus = [];
+	/**
+	 * 根 agent 的 preset 挂载结果（坑十三：不挂 preset 的 agent 没有文件/命令
+	 * 工具；health 可见，`{mounted,id?|reason?}`）。
+	 */
+	let presetStatus = null;
 
 	/**
 	 * 宿主自省：客户端据此判断"这条能力到底可用不可用"，而不是先请求再失败。
@@ -99,6 +104,8 @@ export function apply(ctx, config = {}) {
 			version: "0.1.0",
 			agent: agentInfo(agentRef?.agent ?? null),
 			agentError,
+			/** preset 挂载结果（`{mounted,id}` 或 `{mounted:false,reason}`）。 */
+			preset: presetStatus,
 			memoryActive,
 			labeled,
 			/** 归档自愈：`{checked,archived,lifted,reason}` 或 null（未跑）。 */
@@ -186,8 +193,17 @@ export function apply(ctx, config = {}) {
 						scope.logger?.warn?.("voice-assistant: agents 注册表不可用，常驻 agent 未建立");
 						return;
 					}
-					agentRef = result;
-					scope.effect(() => () => result.dispose(), "voice-assistant: 常驻 agent 生命周期");
+				agentRef = result;
+				presetStatus = result.preset;
+				if (result.preset?.mounted === true) {
+					scope.logger?.info?.(`voice-assistant: 常驻 agent 已挂 preset「${result.preset.id}」（文件/命令工具可用）`);
+				} else if (normalized.agent.preset !== "none") {
+					// 可见降级（与模型路由同一纪律）：能力缺失必须能从 health 看出来。
+					scope.logger?.warn?.(
+						`voice-assistant: preset「${normalized.agent.preset}」未挂上（${result.preset?.reason ?? "unknown"}）—— agent 将没有文件/命令工具`,
+					);
+				}
+				scope.effect(() => () => result.dispose(), "voice-assistant: 常驻 agent 生命周期");
 					// 给常驻会话打上可辨识的标题。DSH 没有安全的"隐藏会话"机制
 					// （见 lib/identity.js 的对照表：归档会让助手哑掉、subagent 标记
 					// 会让会话连不上），所以改为让它在侧边栏**一眼可辨**。

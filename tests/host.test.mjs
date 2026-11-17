@@ -4,6 +4,7 @@ import { quickClean, looksLikeRewrite, STYLE_PROMPTS } from "../lib/polish.js";
 import { ensureSessionNotArchived } from "../lib/identity.js";
 import { normalizeWorkers, workerTargets, DEFAULT_WORKERS } from "../lib/workers.js";
 import { parseRouteOutput } from "../lib/router.js";
+import { mountAgentPreset, composeAgentScope } from "../lib/agent.js";
 
 const failures = [];
 const check = (name, actual, expected) => {
@@ -334,6 +335,44 @@ check("task 空串回退原文", parseRouteOutput('{"worker":"coder","task":""}'
 check("非 JSON 返回 null", parseRouteOutput("我认为应该交给编程专家处理。", known, "原文"), null);
 check("空输出返回 null", parseRouteOutput("", known, "原文"), null);
 check("null 输出返回 null", parseRouteOutput(null, known, "原文"), null);
+
+// ── preset 挂载（坑十三：不带 preset 的 agent 没有文件/命令工具）──────
+check("默认 preset 是 standard", empty.agent.preset, "standard");
+check("preset 写 none 显式关闭", normalizeConfig({ agent: { preset: "none" } }).agent.preset, "none");
+check("preset 非字符串回落默认", normalizeConfig({ agent: { preset: 42 } }).agent.preset, "standard");
+{
+	const calls = [];
+	const fakePresets = {
+		resolve: async (id) => ({ id: id ?? "standard" }),
+		mount: async (agentCtx, id) => {
+			calls.push({ agentCtx, id });
+			return { id };
+		},
+	};
+	const mounted = await mountAgentPreset({ get: () => fakePresets }, "standard");
+	check("preset 挂载成功并记录 id", mounted, { mounted: true, id: "standard" });
+	check("mount 收到解析后的 preset id", calls[0].id, "standard");
+}
+check("preset 写 none = 显式关闭", await mountAgentPreset({}, "none"), { mounted: false, reason: "off" });
+check("preset 服务缺失可见降级", await mountAgentPreset({ get: () => undefined }, "standard"), {
+	mounted: false,
+	reason: "service-missing",
+});
+check("preset get 抛异常可见降级", (await mountAgentPreset({ get: () => { throw new Error("boom"); } }, "standard")).mounted, false);
+check(
+	"preset 服务缺方法可见降级",
+	(await mountAgentPreset({ get: () => ({ resolve: async (id) => ({ id }) }) }, "standard")).reason,
+	"service-incomplete",
+);
+{
+	// composeAgentScope 现在是 async 且返回 preset 报告 —— ensurePersistentAgent
+	// 的 setup 依赖 agent-loop await 它（回归点）。
+	const out = await composeAgentScope(
+		{ get: (name) => (name === "agentPresets" ? { resolve: async (id) => ({ id }), mount: async (_c, id) => ({ id }) } : undefined) },
+		{ agent: { persona: "", preset: "standard" } },
+	);
+	check("composeAgentScope 返回 preset 挂载结果", out.preset, { mounted: true, id: "standard" });
+}
 
 if (failures.length > 0) {
 	console.error(`\n${failures.length} 项失败`);
