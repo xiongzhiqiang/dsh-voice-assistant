@@ -411,6 +411,15 @@ function renderPanel(controller, snapshot, onClose) {
 		row("唤醒词", `${controller.config.wake.word}${controller.config.wake.aliases.length > 0 ? `（含 ${controller.config.wake.aliases.length} 个同音）` : ""}`),
 		row("识别", engineLabel),
 		row("润色", polishLabel),
+		// 两层架构：路由开关 + 最近一次派给了哪位 worker 专家。
+		row(
+			"专家路由",
+			controller.config.routing?.enabled === true
+				? snapshot.routedWorker === ""
+					? `开启（${(controller.config.routing.workers ?? []).length} 位专家；最近一条未分派/派给小凤）`
+					: `开启 → ${snapshot.routedWorker}`
+				: "已关闭",
+		),
 		row("休眠", `${Math.round(controller.config.sleep.idleTimeoutMs / 1000)} 秒无语音（播报完也按这个计时）`),
 		row("完成判据", `静音 ${Math.round((controller.config.turn?.silenceMs ?? 10000) / 1000)} 秒提交（单击语音球可立即提交）`),
 		row("回声抑制", controller.config.turn?.echoGuard === false ? "已关闭" : "已开启"),

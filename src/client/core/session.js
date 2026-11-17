@@ -78,6 +78,19 @@ export class VoiceSession {
 		 */
 		this.pinnedId = null;
 		/**
+		 * 当前 pin 是否由**路由层**设置（区别于用户手动跨会话切换）。
+		 *
+		 * 两者都把 `mode` 置为 `switched`，但语义相反：
+		 *   - 用户手动 pin（`routerPinned === false`）：比自动路由更强的意图
+		 *     表达，路由让位，直到用户切回常驻助手；
+		 *   - 路由 pin（`routerPinned === true`）：**每条指令都该重新路由**，
+		 *     下一条话可能该换专家。
+		 * 没有这个标记，第一次路由之后 `mode` 恒为 `switched`、路由被自己的
+		 * 产物关掉（真机冒烟抓到：`smoke-questions` 报"期望 persistent
+		 * 实际 switched"，即第一条指令路由后全部后续指令不再路由）。
+		 */
+		this.routerPinned = false;
+		/**
 		 * 最近几次 `prompt()` 的**原始**返回与异常（环形，保留 8 条）。
 		 *
 		 * 为什么留这个：`ask()` 把失败统一转成 `Error` 抛给上层，上层再包一层
@@ -251,22 +264,30 @@ export class VoiceSession {
 	 * 所以这里先 `dispose()` 释放旧引用与订阅，再走一遍完整的 `ensure()`。
 	 *
 	 * @param sessionId - 目标会话 id。
+	 * @param options - `{ router?: boolean }`：由路由层发起的切换置 `routerPinned`。
 	 * @returns 是否切换成功。
 	 */
-	async switchTo(sessionId) {
+	async switchTo(sessionId, options = {}) {
 		const id = typeof sessionId === "string" ? sessionId.trim() : "";
 		if (id === "") return false;
-		if (this.binding !== null && this.sessionId === id) return true;
+		if (this.binding !== null && this.sessionId === id) {
+			// 目标没变也要刷新归属：用户手动 pin 之后路由想切回同一会话时，
+			// 归属必须翻成路由的（否则后续指令会被"用户手动 pin"挡住不路由）。
+			if (options.router === true) this.routerPinned = true;
+			return true;
+		}
 		this.dispose();
 		this.sessionId = null;
 		this.mode = "";
 		this.cursor = NO_SEQ;
 		this.turnText = "";
 		this.pinnedId = id;
+		this.routerPinned = options.router === true;
 		const binding = await this.ensure({ open: false });
 		if (binding === null) {
 			// 切不过去就退回常驻会话，别把用户留在"没有目标"的状态。
 			this.pinnedId = null;
+			this.routerPinned = false;
 			this.sessionId = null;
 			await this.ensure({ open: false });
 			return false;
@@ -337,6 +358,7 @@ export class VoiceSession {
 		this.cursor = NO_SEQ;
 		this.turnText = "";
 		this.pinnedId = null;
+		this.routerPinned = false;
 		const binding = await this.ensure({ open: false });
 		return binding !== null;
 	}

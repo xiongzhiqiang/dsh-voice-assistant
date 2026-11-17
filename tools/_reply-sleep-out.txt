@@ -1,0 +1,18 @@
+    → 休眠 60000 ms；静音提交 10000 ms；观察点 13500 ms
+ok   调试钩子就位
+ok   钩子暴露 turnEnd（驱动播报主路径）
+ok   钩子暴露 feed（模拟识别片段）
+ok   休眠时长下发为 60 秒
+ok   回答播完直接落在「正在听」（不必再喊唤醒词）
+ok   轨迹里出现 speaking>active:speak-end（播完进听写）
+ok   轨迹里**没有** speaking>standby:speak-end（那会导致每轮都要重新唤醒）
+ok   播报后 14 秒仍在「正在听」（证伪 12 秒短档）
+ok   播报后直接说话（不带唤醒词）能进门槛 —— 不必重新唤醒
+ok   静默之后确实会入睡（不是永远醒着）
+ok   入睡时间明显晚于 12 秒档（确实是 60 秒这一档）
+
+=== 控制台异常 ===
+  [error] [deepseek-account] account read failed Object
+
+播报后续话与 60s 休眠验证通过
+截图：C:\Users\xqz19\WorkBuddy\DSH_dev\dsh-voice-assistant\tools\_reply-sleep-shot.png

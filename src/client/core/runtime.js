@@ -22,6 +22,8 @@ const FALLBACK = {
 	polish: { enabled: true, style: "clean", timeoutMs: 8000, available: false, model: "" },
 	session: { mode: "dedicated", requestedMode: "dedicated", title: "小凤语音会话", workspace: "", label: "小凤 · 常驻助手" },
 	agent: { enabled: false, sessionId: "", personaActive: false, steer: true },
+	// 两层架构：宿主缺失时路由视为关闭（没有 worker 可切）。
+	routing: { enabled: false, workers: [] },
 	answers: { questionTimeoutMs: 60000, chime: true, repeatOnce: true },
 	// 全局记忆。宿主缺失时一律视为未生效 —— 它本来就只能在宿主侧注册，
 	// 这里给 `global:false` 是为了让面板有一句确定的"未开启"而不是 `undefined`。
@@ -62,6 +64,7 @@ export function readConfig() {
 			polish: { ...base.polish, ...(injected.polish ?? {}) },
 			session: { ...base.session, ...(injected.session ?? {}) },
 			agent: { ...base.agent, ...(injected.agent ?? {}) },
+			routing: { ...base.routing, ...(injected.routing ?? {}) },
 			answers: { ...base.answers, ...(injected.answers ?? {}) },
 			memory: { ...base.memory, ...(injected.memory ?? {}) },
 			turn: { ...base.turn, ...(injected.turn ?? {}) },
@@ -115,6 +118,20 @@ async function request(path, options = {}) {
  */
 export async function polish(text) {
 	const response = await request("/polish", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ text }),
+	});
+	return response.json();
+}
+
+/**
+ * 请求意图路由（两层架构第一层）。
+ * @param text - 已润色的指令文本。
+ * @returns `{ worker, task, via, ms? }`；失败时由调用方降级。
+ */
+export async function route(text) {
+	const response = await request("/route", {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify({ text }),

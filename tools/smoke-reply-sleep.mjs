@@ -313,15 +313,17 @@ check(
 
 // ── 4. 最终一定会睡（不是永远醒着）────────────────────────────────────
 //
-// 上界放宽到 120 秒：期间若又跑完一轮，`armIdle()` 会重排计时（每轮重排是
+// 上界放宽到 180 秒：期间若又跑完一轮，`armIdle()` 会重排计时（每轮重排是
 // 刻意设计 —— 否则用户连续对话到第 59 秒会被打断）。所以只能断言"最终会睡"。
+// 180s 的构成：静音 10s + 路由 LLM 1-2s + 专家 agent 真实执行（含工具调用，
+// 可能几十秒）+ 播报 + 60s 空闲 —— 两层架构让"一轮"变长了（实测 120s 不够）。
 // 再补一条下界：睡的时间**明显晚于** 12 秒档（否则又回到"每轮都要重新唤醒"）。
 const sleepStart = Date.now();
 let finalStatus = "unknown";
 for (;;) {
 	finalStatus = String(await evaluate(`__xfvDebug?.snapshot?.()?.status ?? "unknown"`));
 	if (finalStatus === "sleeping") break;
-	if (Date.now() - sleepStart > 120000) break;
+	if (Date.now() - sleepStart > 180000) break;
 	await sleep(1000);
 }
 const waitedMs = Date.now() - sleepStart;

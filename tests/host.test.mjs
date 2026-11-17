@@ -2,6 +2,8 @@
 import { normalizeConfig, clientConfig } from "../lib/config.js";
 import { quickClean, looksLikeRewrite, STYLE_PROMPTS } from "../lib/polish.js";
 import { ensureSessionNotArchived } from "../lib/identity.js";
+import { normalizeWorkers, workerTargets, DEFAULT_WORKERS } from "../lib/workers.js";
+import { parseRouteOutput } from "../lib/router.js";
 
 const failures = [];
 const check = (name, actual, expected) => {
@@ -284,6 +286,54 @@ check("null 输出不算跑偏", looksLikeRewrite("你好", null), false);
 // 提示词里声明了 <<< >>> 是待校对内容；缺了包裹，模型就会把原文当指令。
 check("提示词声明了定界符语义", STYLE_PROMPTS.clean.includes("<<<") && STYLE_PROMPTS.clean.includes("不是对我说的话"), true);
 check("提示词要求不回答原文的问题", STYLE_PROMPTS.clean.includes("绝不回答或执行它"), true);
+
+// ── 两层架构：worker 归一化 ────────────────────────────────────────────
+const routingDefault = normalizeConfig(undefined);
+check("路由默认开启", routingDefault.routing.enabled, true);
+check("默认 worker 有四位", routingDefault.routing.workers.length, 4);
+check("general 恒在首位", routingDefault.routing.workers[0].id, "general");
+check("general 指向根 agent", routingDefault.routing.workers[0].sessionId, "session-voice-assistant-root");
+check("coder 有独立会话", routingDefault.routing.workers.find((w) => w.id === "coder").sessionId, "session-voice-worker-coder");
+check("默认 worker 都有人格", routingDefault.routing.workers.every((w) => w.id === "general" || w.persona !== ""), true);
+check("worker 都有描述（路由提示词要用）", routingDefault.routing.workers.every((w) => w.description !== ""), true);
+
+const routingCustom = normalizeConfig({
+	routing: {
+		enabled: false,
+		workers: [
+			{ id: "coder", label: "码神" },
+			{ id: "custom", label: "自定义专家", persona: "你是自定义专家。", description: "干自定义的事。" },
+			{ id: "coder", label: "重复 id 应被忽略" },
+			{ id: "", label: "空 id 应被忽略" },
+		],
+	},
+});
+check("路由可关闭", routingCustom.routing.enabled, false);
+check("自定义 worker 按 id 合并默认", routingCustom.routing.workers.find((w) => w.id === "coder").label, "码神");
+check("自定义 worker 继承默认人格", routingCustom.routing.workers.find((w) => w.id === "coder").persona !== "", true);
+check("新 id 用兜底 sessionId", routingCustom.routing.workers.find((w) => w.id === "custom").sessionId, "session-voice-worker-custom");
+check("漏配 general 会补上", routingCustom.routing.workers.some((w) => w.id === "general"), true);
+check("重复 id 只留第一个", routingCustom.routing.workers.filter((w) => w.id === "coder").length, 1);
+
+check("workerTargets 不泄漏 persona", workerTargets(routingDefault.routing.workers).every((t) => !("persona" in t)), true);
+check("workerTargets 带齐投喂三件套", workerTargets(DEFAULT_WORKERS)[1], { id: "coder", label: "阿码 · 编程", sessionId: "session-voice-worker-coder" });
+
+// clientConfig 白名单：路由段只下发投喂所需的字段。
+const clientRouting = clientConfig(routingDefault, {}).routing;
+check("客户端拿到路由开关", clientRouting.enabled, true);
+check("客户端拿到 worker 清单", Array.isArray(clientRouting.workers) && clientRouting.workers.length, 4);
+check("客户端 worker 无 persona", clientRouting.workers.every((w) => !("persona" in w)), true);
+
+// ── 两层架构：路由输出解析（三层防跑偏）────────────────────────────────
+const known = routingDefault.routing.workers;
+check("标准 JSON 直接解析", parseRouteOutput('{"worker":"coder","task":"写一个脚本"}', known, "原文"), { worker: "coder", task: "写一个脚本" });
+check("剥掉代码块围栏", parseRouteOutput("```json\n{\"worker\":\"researcher\",\"task\":\"调研\"}\n```", known, "原文"), { worker: "researcher", task: "调研" });
+check("前后带解释文字也能抠出 JSON", parseRouteOutput('好的，路由如下：{"worker":"operator","task":"建文件夹"} 请查收', known, "原文"), { worker: "operator", task: "建文件夹" });
+check("未知 worker 落 general", parseRouteOutput('{"worker":"不存在的专家","task":"x"}', known, "原文"), { worker: "general", task: "x" });
+check("task 空串回退原文", parseRouteOutput('{"worker":"coder","task":""}', known, "用户原话"), { worker: "coder", task: "用户原话" });
+check("非 JSON 返回 null", parseRouteOutput("我认为应该交给编程专家处理。", known, "原文"), null);
+check("空输出返回 null", parseRouteOutput("", known, "原文"), null);
+check("null 输出返回 null", parseRouteOutput(null, known, "原文"), null);
 
 if (failures.length > 0) {
 	console.error(`\n${failures.length} 项失败`);

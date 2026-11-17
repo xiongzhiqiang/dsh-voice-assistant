@@ -1,10 +1,37 @@
 # dsh-voice-assistant —— 「小凤」语音助手
 
 > 让 DeepSeek Harness 从「打字对话」变成「对着电脑说话」：
-> 常驻待机 → 喊「小凤」唤醒 → 说话 → 自动润色 → 进会话 → 念出回答 →
-> 静默 1 分钟自动休眠 → 提示音或 agent 消息把它叫回来。
+> 常驻待机 → 喊「小凤」唤醒 → 说话 → 自动润色 → **意图路由** → 进专家会话 →
+> 念出回答 → 静默 1 分钟自动休眠 → 提示音或 agent 消息把它叫回来。
 
-一个 DSH bundle 插件：宿主半（配置 / 润色 / 语音代理）+ 客户端半（浮层 / 状态机 / 唤醒 / 播报）。
+一个 DSH bundle 插件：宿主半（配置 / 润色 / **路由** / worker 专家 / 语音代理）+
+客户端半（浮层 / 状态机 / 唤醒 / 播报）。
+
+## 两层 agent 架构（V1.1 起，默认开启）
+
+「小凤」本体是 **router（第一层）**，四位**常驻专家 agent 是 worker（第二层）**：
+
+```
+用户语音 → 润色(/api/polish) → 路由(/api/route, LLM 意图分类+任务改写)
+                                     ↓ {worker, task}
+                switchTo(worker 会话) → prompt(task) → 事件订阅 → 播报
+```
+
+| Worker | 会话 | 职责 |
+|---|---|---|
+| `general`（小凤·通用） | 根 agent 会话（兜底） | 闲聊、问答、杂项 |
+| `coder`（阿码·编程） | `session-voice-worker-coder` | 写代码、调试、重构、跑测试 |
+| `researcher`（阿研·调研） | `session-voice-worker-researcher` | 查资料、总结、写报告 |
+| `operator`（阿卓·操作） | `session-voice-worker-operator` | 文件/目录、打开程序、执行命令 |
+
+设计要点（详见「架构注记」）：
+
+- 专家各自持有**独立 session 与 persona**，对话历史互不污染；
+- 路由失败/超时/关闭 → 一律落 `general` + 原文，用户无感、指令不丢；
+- 用户用跨会话功能**手动点名**的会话优先于自动路由（直到切回常驻）；
+- 路由自己发起的切换带 `routerPinned` 标记——每条指令都会重新路由；
+- 配置：`cordis.patch.yml` 的 `routing:` 段（`enabled` / `timeoutMs` / `workers` 清单，
+  未配置时用上表默认四位；`general` 恒在、指向根 agent）。
 
 ---
 
@@ -1193,6 +1220,30 @@ bundle 都是 `SPEAKING --speak-end--> ACTIVE`（正在听），播完 14 秒仍
 且不带唤醒词直接说话会被接受。用户看到的现象来自重启前的旧实例/缓存；
 本次重启后已随回滚一并生效。
 
+**坑十二：两层架构的两个隐形陷阱（router.js 的 deltaText 与 session 的路由 pin）。**
+
+（2026-11-17，router + worker 两层架构落地当天，两个都是"全绿假象"型）
+
+**① `llm.stream` 的分片协议只认 `type:"text-delta"`。** 复刻 `polish.js` 的
+`deltaText` 时顺手"兼容"了 OpenAI 风格的 `delta.content` —— 结果**真正的
+`text-delta` 分片一个都取不到**（`assembled` 恒空 → 路由恒 fallback），且症状
+与"模型不可用"一模一样（每条都安静地落 general）。判法：给路由端点计时——
+600–1600ms 的耗时说明 LLM **真的被调了**，输出却是空的 ⇒ 必是取分片的代码。
+铁律：**复刻协议解析时一个字符都别"顺手优化"**，且降级路径必须打日志
+（本次就是靠补了 `logger.warn` 才一击定位）。
+
+**② 路由切换会把 `mode` 置为 `switched`，恰好踩中"用户手动切换优先"的让位条件。**
+第一版跳过条件是 `mode !== "switched"`——结果**第一次路由之后** `mode` 恒为
+`switched`，后续指令全部不再路由（架构被自己的产物关掉）。`smoke-questions`
+的"默认目标为常驻助手"断言红了才暴露。修法：`VoiceSession.switchTo(id, {router:true})`
+带 `routerPinned` 标记；跳过条件只拦"用户手动 pin"（`switched && !routerPinned`）。
+连带修第二处：**`general` 要"回家"（`switchToPersistent()`）而不是被 pin 成普通
+目标**——否则根会话的 mode 从 `persistent` 变 `switched`，行为相同、语义全反。
+
+**③ 测试预算随链路变长而失效。** `smoke-reply-sleep` 的"最终会入睡"上界
+120s 在两层架构下不够（静音 10s + 路由 1–2s + 专家真实执行几十秒 + 60s 空闲），
+放宽到 180s。这类"上界魔法数"在链路里加环节时必须重新预算。
+
 ---
 
 ## 八、已知边界
@@ -1245,9 +1296,11 @@ index.js                    宿主半入口：配置归一化、配置下发、A
 lib/config.js               配置归一化 + 客户端白名单裁剪（含 turn 的夹取与语义保护）
 lib/identity.js             宿主半身份：常驻会话可见性标注 + 全局记忆注册 + **归档自愈**（含「隐藏不可行」证伪表）
 lib/agent.js                常驻 agent：模型路由解析/落盘、人格段、生命周期
+lib/workers.js              worker 专家层：默认四位专家、归一化、批量建立（复用 ensurePersistentAgent；标注+归档自愈与根 agent 一致）
+lib/router.js               意图路由（两层第一层）：LLM 意图分类 + 任务改写；严格 JSON + 白名单 + general 兜底
 lib/polish.js               转录润色（llm.stream）+ 跑偏检测 + 规则兜底
 lib/upstream.js             OpenAI 兼容 ASR/TTS 代理
-lib/routes.js               /health /config /polish /asr /tts
+lib/routes.js               /health /config /polish /route /asr /tts
 src/client/index.js         客户端入口：装配、快捷键、卸载
 src/client/core/machine.js  六态状态机（纯函数，可脱离浏览器测试）
 src/client/core/wakeword.js 唤醒词同音匹配 + 指令切分

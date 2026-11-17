@@ -34,6 +34,7 @@
 import { clientConfig, normalizeConfig } from "./lib/config.js";
 import { API_PREFIX, installApiRoutes } from "./lib/routes.js";
 import { agentInfo, ensurePersistentAgent } from "./lib/agent.js";
+import { ensureWorkerAgents } from "./lib/workers.js";
 import { labelAgentSession, registerGlobalMemory, ensureSessionNotArchived } from "./lib/identity.js";
 
 /** 插件名（fiber 诊断与日志前缀）。 */
@@ -74,6 +75,11 @@ export function apply(ctx, config = {}) {
 	 * 详见 lib/identity.js 的 `ensureSessionNotArchived`。
 	 */
 	let archivedFix = null;
+	/**
+	 * Worker 专家 agent 的建立结果（health 与路由层共用；`routing.enabled`
+	 * 为假时恒为空数组 = 两层架构关闭）。
+	 */
+	let workersStatus = [];
 
 	/**
 	 * 宿主自省：客户端据此判断"这条能力到底可用不可用"，而不是先请求再失败。
@@ -97,6 +103,11 @@ export function apply(ctx, config = {}) {
 			labeled,
 			/** 归档自愈：`{checked,archived,lifted,reason}` 或 null（未跑）。 */
 			archivedFix,
+			/** 两层架构：路由开关 + worker 专家清单及各自就绪状态。 */
+			routing: {
+				enabled: normalized.routing.enabled,
+				workers: workersStatus,
+			},
 			capabilities: {
 				polishAvailable: typeof llm?.stream === "function" && polishModel !== "",
 				polishModel,
@@ -145,6 +156,28 @@ export function apply(ctx, config = {}) {
 	if (normalized.agent.enabled) {
 		ctx.inject(["agentLoop"], (scope) => {
 			let settled = false;
+
+			// 0.5) Worker 专家 agent（两层架构的第二层）。与根 agent 并行建立：
+			//      互不依赖（各自独立 session），且单个 worker 失败不连坐。
+			//      路由关闭时清单纯占位（general 指向根 agent，无需建）。
+			if (normalized.routing.enabled) {
+				ensureWorkerAgents(ctx, scope, normalized, normalized.routing.workers)
+					.then((results) => {
+						workersStatus = results;
+						const ready = results.filter((row) => row.ok === true).length;
+						const total = results.length - 1; // general 不单建。
+						scope.logger?.info?.(
+							`voice-assistant: worker 专家层就绪（${ready}/${total} 可用${total === ready ? "" : "，未就绪的路由会跳过"}）`,
+						);
+					})
+					.catch((error) => {
+						workersStatus = [];
+						scope.logger?.warn?.(
+							`voice-assistant: worker 专家层建立失败（路由将全部落 general）—— ${String(error?.message ?? error)}`,
+						);
+					});
+			}
+
 			ensurePersistentAgent(scope, normalized)
 				.then((result) => {
 					settled = true;

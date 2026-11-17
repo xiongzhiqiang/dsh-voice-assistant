@@ -49,7 +49,7 @@ import { TurnGate } from "./turn.js";
 import { EchoGuard } from "./echo.js";
 import { QuestionBridge, matchAnswer, speakQuestion } from "./questions.js";
 import { playChime, unlockAudio } from "./chime.js";
-import { polish, log, warn } from "./runtime.js";
+import { polish, route, log, warn } from "./runtime.js";
 import { WebSpeechEngine, isAvailable as webSpeechAvailable } from "./engines/webspeech.js";
 import { HttpAsrEngine, isAvailable as httpAsrAvailable } from "./engines/http.js";
 import { makeEarsRecognizer, probeEars } from "./engines/ears.js";
@@ -87,6 +87,9 @@ export class VoiceController {
 			engine: this.pickEngineName(),
 			sessionId: null,
 			polishVia: "",
+			/** 两层架构：本条指令路由给了哪位 worker（空 = 未路由/路由失败）。 */
+			routedWorker: "",
+			routeVia: "",
 			error: "",
 			/** 已攒下、尚未提交的整轮发言（界面显示"听到（待提交）"）。 */
 			pending: "",
@@ -984,11 +987,71 @@ export class VoiceController {
 		}
 		this.patch({ heard: text, polishVia: via });
 
+		// ── 两层架构第一层：意图路由（润色之后、提交之前）──────────────
+		//
+		// 为什么在润色之后：路由模型拿到的是干净指令，分类质量更高。
+		// 为什么尊重"用户手动切换"：用户用跨会话功能**点名**了目标会话时，
+		// 那是比自动路由更强的意图表达 —— 路由让位，直到用户切回常驻。
+		// （路由自己发起的切换带 `routerPinned` 标记，不受此限 —— 否则第一次
+		// 路由之后 mode 恒为 switched，后续指令全部不再路由，卡死在上一个专家。）
+		// 降级链：路由失败/关闭 → task=原文、目标不变（根 agent「小凤」）。
+		let task = text;
+		if (
+			this.config.routing?.enabled === true &&
+			Array.isArray(this.config.routing.workers) &&
+			this.config.routing.workers.length > 0 &&
+			!(this.session.mode === "switched" && this.session.routerPinned !== true)
+		) {
+			try {
+				const outcome = await route(text);
+				if (generation !== this.generation) return;
+				if (typeof outcome?.task === "string" && outcome.task.trim() !== "") task = outcome.task.trim();
+				const workerId = typeof outcome?.worker === "string" ? outcome.worker : "general";
+				const worker =
+					this.config.routing.workers.find((row) => row.id === workerId) ??
+					this.config.routing.workers.find((row) => row.id === "general");
+				const routeVia = typeof outcome.via === "string" ? outcome.via : "llm";
+				if (worker === undefined) {
+					this.patch({ routedWorker: "", routeVia });
+				} else if (worker.id === "general") {
+					// general = 根 agent「小凤」：**回家**（回常驻绑定），而不是
+					// 把根会话 pin 成一个普通目标 —— pin 会让 mode 变成
+					// "switched"，`smoke-questions` 的"默认目标为常驻助手"
+					// 断言就是这么红的（行为上同一个会话，语义上是两回事）。
+					if (this.session.usingPersistent() && this.session.mode !== "persistent") {
+						await this.session.switchToPersistent();
+					}
+					this.patch({ routedWorker: "", routeVia, sessionTarget: this.session.describe() });
+				} else if (typeof worker.sessionId === "string" && worker.sessionId !== "") {
+					if (this.session.sessionId !== worker.sessionId) {
+						const ok = await this.session.switchTo(worker.sessionId, { router: true });
+						if (!ok) {
+							// 切不过去（worker 会话不可用）就在当前会话执行：
+							// "话发出去"优先于"发给了对的专家"。
+							warn("worker 会话不可用，指令改投当前会话", worker.id);
+						}
+					}
+					this.patch({
+						routedWorker: this.session.sessionId === worker.sessionId ? worker.label : "",
+						routeVia,
+						sessionTarget: this.session.describe(),
+					});
+				} else {
+					this.patch({ routedWorker: "", routeVia });
+				}
+			} catch (error) {
+				warn("意图路由不可用，按原目标发送", error);
+				this.patch({ routedWorker: "", routeVia: "error" });
+			}
+		} else {
+			this.patch({ routedWorker: "", routeVia: "" });
+		}
+
 		this.machine.send(EVENTS.COMMAND);
 		// 迁移会换代，所以要在 send 之后重新取一次代号再比较，
 		// 否则 `accepted` 的失败处理会被自己刚触发的迁移判成"过期的回调"而跳过。
 		const afterSend = this.generation;
-		const accepted = await this.session.ask(text);
+		const accepted = await this.session.ask(task);
 		if (afterSend !== this.generation) return;
 		if (!accepted) {
 			this.fail(new Error("prompt-rejected"));
