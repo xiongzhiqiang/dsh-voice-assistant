@@ -30,6 +30,10 @@
  * 实现需求 5 的"被 agent 消息唤醒后播报"。这一点不依赖麦克风，
  * 所以休眠真的可以关掉音频设备。
  *
+ * V1.3 起多一条入向信号：**worker 汇报**。小凤路由到专家后留在根会话，只把
+ * 任务交给 `/delegate`；专家完成后由宿主汇总要点入队，客户端经 `/reports`
+ * 按完成先后逐条播报。全过程不切会话、不旁听中间输出。
+ *
  * ## 三个必须守住的约束
  *
  * 1. **播报时关麦**。不关的话，TTS 的声音会被自己识别回去，
@@ -49,7 +53,7 @@ import { TurnGate } from "./turn.js";
 import { EchoGuard } from "./echo.js";
 import { QuestionBridge, matchAnswer, speakQuestion } from "./questions.js";
 import { playChime, unlockAudio } from "./chime.js";
-import { polish, route, log, warn } from "./runtime.js";
+import { polish, route, delegate, reports as fetchReports, log, warn } from "./runtime.js";
 import { WebSpeechEngine, isAvailable as webSpeechAvailable } from "./engines/webspeech.js";
 import { HttpAsrEngine, isAvailable as httpAsrAvailable } from "./engines/http.js";
 import { makeEarsRecognizer, probeEars } from "./engines/ears.js";
@@ -90,6 +94,12 @@ export class VoiceController {
 			/** 两层架构：本条指令路由给了哪位 worker（空 = 未路由/路由失败）。 */
 			routedWorker: "",
 			routeVia: "",
+			/**
+			 * V1.3 委托汇报：当前已派给 worker、还在后台执行的任务数（界面显示"处理中"）。
+			 */
+			pendingDelegations: 0,
+			/** 最近一条 worker 汇报要点（HUD 显示用）。 */
+			lastReport: "",
 			error: "",
 			/** 已攒下、尚未提交的整轮发言（界面显示"听到（待提交）"）。 */
 			pending: "",
@@ -203,6 +213,17 @@ export class VoiceController {
 		this.noticeTimer = null;
 		this.echoTimer = null;
 		this.disposed = false;
+		/**
+		 * V1.3 委托汇报队列：worker 完成的要点按完成先后排队，逐条播报。
+		 *
+		 * `reportCursor` 是服务端的 monotonic 时间戳游标：首帧传 `"latest"`
+		 * 只同步不重放；之后只取 `at > cursor` 的新汇报。
+		 */
+		this.reportCursor = undefined;
+		this.reportQueue = [];
+		this.reportDraining = false;
+		this.reportTimer = null;
+		this.lastReportText = "";
 		/**
 		 * 在这台机器上**已确认不可用**的引擎名。
 		 *
@@ -544,11 +565,17 @@ export class VoiceController {
 		if (this.machine.get() !== STATES.OFF) return true;
 		this.patch({ powered: true, error: "" });
 		this.machine.send(EVENTS.START);
+		// 若之前已有委托在途（例如休眠/停用期间提交的），恢复后继续取汇报。
+		if (this.reportQueue.length > 0 || this.snapshot.pendingDelegations > 0) {
+			this.startReportPolling();
+			this.pollReports();
+		}
 		return true;
 	}
 
-	/** 停用语音：释放麦克风与音频。 */
+	/** 停用语音：释放麦克风与音频（已在途的后台委托保留，重新启用后继续取汇报）。 */
 	stop() {
+		this.stopReportPolling();
 		this.machine.send(EVENTS.STOP);
 		this.patch({ powered: false, partial: "", heard: "", answer: "" });
 	}
@@ -992,10 +1019,13 @@ export class VoiceController {
 		// 为什么在润色之后：路由模型拿到的是干净指令，分类质量更高。
 		// 为什么尊重"用户手动切换"：用户用跨会话功能**点名**了目标会话时，
 		// 那是比自动路由更强的意图表达 —— 路由让位，直到用户切回常驻。
-		// （路由自己发起的切换带 `routerPinned` 标记，不受此限 —— 否则第一次
-		// 路由之后 mode 恒为 switched，后续指令全部不再路由，卡死在上一个专家。）
-		// 降级链：路由失败/关闭 → task=原文、目标不变（根 agent「小凤」）。
+		//
+		// V1.3 起这里**不再切会话**：非 general 的 worker 走 /delegate 后台
+		// 执行，客户端留在根会话；worker 完成后由宿主汇总要点入队，再经
+		// /reports 按完成先后依次播报（见下面的轮询器）。
+		// 降级链：路由失败/关闭 → 进根 agent「小凤」；委托失败 → 也进根 agent。
 		let task = text;
+		let delegated = false;
 		if (
 			this.config.routing?.enabled === true &&
 			Array.isArray(this.config.routing.workers) &&
@@ -1011,31 +1041,39 @@ export class VoiceController {
 					this.config.routing.workers.find((row) => row.id === workerId) ??
 					this.config.routing.workers.find((row) => row.id === "general");
 				const routeVia = typeof outcome.via === "string" ? outcome.via : "llm";
-				if (worker === undefined) {
+
+				if (worker !== undefined && worker.id !== "general") {
+					// 真正的专家：提交给宿主后台执行，不切会话、不旁听中间过程。
+					try {
+						const result = await delegate(worker.id, task);
+						if (generation !== this.generation) return;
+						if (result?.ok === true) {
+							delegated = true;
+							this.patch({
+								routedWorker: worker.label,
+								routeVia,
+								pendingDelegations: this.snapshot.pendingDelegations + 1,
+								sessionTarget: this.session.describe(),
+							});
+							this.notice(`已交给${worker.label}处理，完成后我会汇报要点。`, "info");
+							// 立刻探一次（worker 可能几百毫秒就完成），并启动轮询。
+							this.startReportPolling();
+							this.pollReports();
+							return;
+						}
+						warn("委托被拒，指令改投根会话", worker.id, result?.error);
+						this.notice(`${worker.label}暂时不可用，我先来处理。`, "warn");
+					} catch (error) {
+						warn("委托提交失败，指令改投根会话", error);
+						this.notice("专家派单暂不可用，我先来处理。", "warn");
+					}
 					this.patch({ routedWorker: "", routeVia });
-				} else if (worker.id === "general") {
-					// general = 根 agent「小凤」：**回家**（回常驻绑定），而不是
-					// 把根会话 pin 成一个普通目标 —— pin 会让 mode 变成
-					// "switched"，`smoke-questions` 的"默认目标为常驻助手"
-					// 断言就是这么红的（行为上同一个会话，语义上是两回事）。
+				} else if (worker !== undefined && worker.id === "general") {
+					// general = 根 agent「小凤」：**回家**（回常驻绑定），不 pin。
 					if (this.session.usingPersistent() && this.session.mode !== "persistent") {
 						await this.session.switchToPersistent();
 					}
 					this.patch({ routedWorker: "", routeVia, sessionTarget: this.session.describe() });
-				} else if (typeof worker.sessionId === "string" && worker.sessionId !== "") {
-					if (this.session.sessionId !== worker.sessionId) {
-						const ok = await this.session.switchTo(worker.sessionId, { router: true });
-						if (!ok) {
-							// 切不过去（worker 会话不可用）就在当前会话执行：
-							// "话发出去"优先于"发给了对的专家"。
-							warn("worker 会话不可用，指令改投当前会话", worker.id);
-						}
-					}
-					this.patch({
-						routedWorker: this.session.sessionId === worker.sessionId ? worker.label : "",
-						routeVia,
-						sessionTarget: this.session.describe(),
-					});
 				} else {
 					this.patch({ routedWorker: "", routeVia });
 				}
@@ -1047,6 +1085,7 @@ export class VoiceController {
 			this.patch({ routedWorker: "", routeVia: "" });
 		}
 
+		// 非委托路径：正常把任务写进（根）会话，等它的 turn/end 播报。
 		this.machine.send(EVENTS.COMMAND);
 		// 迁移会换代，所以要在 send 之后重新取一次代号再比较，
 		// 否则 `accepted` 的失败处理会被自己刚触发的迁移判成"过期的回调"而跳过。
@@ -1055,6 +1094,106 @@ export class VoiceController {
 		if (afterSend !== this.generation) return;
 		if (!accepted) {
 			this.fail(new Error("prompt-rejected"));
+		}
+	}
+
+	/** ── V1.3 委托汇报：轮询 + 按完成时间依次播报 ───────────────────── */
+
+	/**
+	 * 启动汇报轮询（幂等）。在首次成功委托后调用 —— 没有委托就轮询纯属浪费。
+	 *
+	 * 间隔取宿主下发的 `routing.reportPollMs`（默认 1.5s）；首次同步用
+	 * `"latest"` 游标，只对齐水位、不重放历史汇报。
+	 */
+	startReportPolling() {
+		if (this.disposed || this.reportTimer !== null) return;
+		if (this.reportCursor === undefined) this.reportCursor = "latest";
+		const interval = Number.isFinite(this.config.routing?.reportPollMs)
+			? Math.max(500, this.config.routing.reportPollMs)
+			: 1500;
+		this.reportTimer = setInterval(() => this.pollReports(), interval);
+		log(`汇报轮询已启动（间隔 ${interval}ms）`);
+	}
+
+	/** 停止汇报轮询。 */
+	stopReportPolling() {
+		if (this.reportTimer !== null) {
+			clearInterval(this.reportTimer);
+			this.reportTimer = null;
+		}
+	}
+
+	/**
+	 * 拉一次新汇报，入队后依次播报。
+	 *
+	 * ## 为什么"首帧 latest"不能省
+	 *
+	 * 常驻 agent / 汇报队列跨会话、跨刷新存活。若首帧从 0 开始拉，会把上次
+	 * 会话（甚至几天前）的汇报一次性全念出来 —— 与会话事件的水位线同一类
+	 * 事故。首帧只同步游标，之后才取增量。
+	 */
+	async pollReports() {
+		if (this.disposed) return;
+		try {
+			const payload = await fetchReports(this.reportCursor);
+			if (this.disposed) return;
+			if (typeof payload?.cursor === "number") this.reportCursor = payload.cursor;
+			const incoming = Array.isArray(payload?.reports) ? payload.reports : [];
+			if (incoming.length > 0) {
+				// 服务端已按完成时间升序；客户端只做去重（游标兜底）。
+				for (const report of incoming) this.reportQueue.push(report);
+				this.patch({ pendingDelegations: Math.max(0, this.snapshot.pendingDelegations - incoming.length) });
+				this.drainReports();
+			}
+		} catch (error) {
+			// 轮询失败不打扰用户（间隔短、会重试），但要留一条可见结论。
+			warn("汇报轮询失败（稍后重试）", error?.message ?? error);
+		}
+	}
+
+	/**
+	 * 逐条播报队列里的汇报要点（完成先后 = 入队顺序）。
+	 *
+	 * ## 为什么必须串行 + 等 SPEAK_END
+	 *
+	 * 多个 worker 几乎同时完成时，如果各自直接 `speak()`，后一条会 cancel
+	 * 前一条 —— 用户只听到最后一句。这里用 `reportDraining` 做互斥，一条
+	 * 播完（含回声静默）再播下一条，保证需求 2 的"按时间先后依次汇报"。
+	 */
+	async drainReports() {
+		if (this.disposed || this.reportDraining) return;
+		this.reportDraining = true;
+		try {
+			while (this.reportQueue.length > 0 && !this.disposed) {
+				// 用户停用语音：队列留着，等下次 start() 再播，不擅自出声。
+				if (this.machine.get() === STATES.OFF) break;
+				const report = this.reportQueue.shift();
+				const text = typeof report?.speech === "string" && report.speech.trim() !== ""
+					? report.speech.trim()
+					: String(report?.summary ?? "").trim();
+				if (text === "") continue;
+
+				this.patch({ lastReport: text, answer: text });
+				this.pushHistory("assistant", text);
+				const wasSleeping = this.machine.get() === STATES.SLEEPING;
+				if (wasSleeping) this.chime("wake");
+				this.machine.send(EVENTS.AGENT_MESSAGE);
+				this.echoGuard.remember(text);
+
+				const generation = this.generation;
+				try {
+					await this.speaker.speak(text);
+				} catch (error) {
+					warn("汇报播报失败", error?.message ?? error);
+				}
+				if (generation !== this.generation) break; // 期间被打断/休眠。
+				this.machine.send(EVENTS.SPEAK_END);
+				this.patch({ partial: "" });
+				// 两条汇报之间留一小段静默，避免连读糊成一句。
+				await new Promise((resolve) => setTimeout(resolve, 400));
+			}
+		} finally {
+			this.reportDraining = false;
 		}
 	}
 
@@ -1633,6 +1772,7 @@ export class VoiceController {
 	/** 释放所有资源。 */
 	dispose() {
 		this.disposed = true;
+		this.stopReportPolling();
 		clearTimeout(this.idleTimer);
 		clearTimeout(this.noticeTimer);
 		clearTimeout(this.echoTimer);

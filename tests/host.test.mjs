@@ -5,6 +5,8 @@ import { ensureSessionNotArchived } from "../lib/identity.js";
 import { normalizeWorkers, workerTargets, DEFAULT_WORKERS } from "../lib/workers.js";
 import { parseRouteOutput } from "../lib/router.js";
 import { mountAgentPreset, composeAgentScope } from "../lib/agent.js";
+import { createReportQueue, deterministicSummary, formatReportSpeech, parseReportAfter } from "../lib/report.js";
+import { createDelegationHub } from "../lib/delegation.js";
 
 const failures = [];
 const check = (name, actual, expected) => {
@@ -294,7 +296,7 @@ check("路由默认开启", routingDefault.routing.enabled, true);
 check("默认 worker 有四位", routingDefault.routing.workers.length, 4);
 check("general 恒在首位", routingDefault.routing.workers[0].id, "general");
 check("general 指向根 agent", routingDefault.routing.workers[0].sessionId, "session-voice-assistant-root");
-check("coder 有独立会话", routingDefault.routing.workers.find((w) => w.id === "coder").sessionId, "session-voice-worker-coder");
+check("coder 有独立会话", routingDefault.routing.workers.find((w) => w.id === "coder").sessionId, "session-voice-worker-coder-v2");
 check("默认 worker 都有人格", routingDefault.routing.workers.every((w) => w.id === "general" || w.persona !== ""), true);
 check("worker 都有描述（路由提示词要用）", routingDefault.routing.workers.every((w) => w.description !== ""), true);
 
@@ -317,13 +319,16 @@ check("漏配 general 会补上", routingCustom.routing.workers.some((w) => w.id
 check("重复 id 只留第一个", routingCustom.routing.workers.filter((w) => w.id === "coder").length, 1);
 
 check("workerTargets 不泄漏 persona", workerTargets(routingDefault.routing.workers).every((t) => !("persona" in t)), true);
-check("workerTargets 带齐投喂三件套", workerTargets(DEFAULT_WORKERS)[1], { id: "coder", label: "阿码 · 编程", sessionId: "session-voice-worker-coder" });
+check("workerTargets 带齐投喂三件套", workerTargets(DEFAULT_WORKERS)[1], { id: "coder", label: "阿码 · 编程", sessionId: "session-voice-worker-coder-v2" });
 
 // clientConfig 白名单：路由段只下发投喂所需的字段。
 const clientRouting = clientConfig(routingDefault, {}).routing;
 check("客户端拿到路由开关", clientRouting.enabled, true);
 check("客户端拿到 worker 清单", Array.isArray(clientRouting.workers) && clientRouting.workers.length, 4);
 check("客户端 worker 无 persona", clientRouting.workers.every((w) => !("persona" in w)), true);
+check("委托超时默认 5 分钟", routingDefault.routing.jobTimeoutMs, 300000);
+check("委托超时下界夹取", normalizeConfig({ routing: { jobTimeoutMs: 100 } }).routing.jobTimeoutMs, 30000);
+check("委托超时的上报间隔可配", normalizeConfig({ routing: { reportPollMs: 200 } }).routing.reportPollMs, 500);
 
 // ── 两层架构：路由输出解析（三层防跑偏）────────────────────────────────
 const known = routingDefault.routing.workers;
@@ -372,6 +377,161 @@ check(
 		{ agent: { persona: "", preset: "standard" } },
 	);
 	check("composeAgentScope 返回 preset 挂载结果", out.preset, { mounted: true, id: "standard" });
+}
+
+// ── V1.3：派单 → 要点汇总 → 按完成先后汇报 ────────────────────────────
+{
+	const queue = createReportQueue({ limit: 5 });
+	check("首帧 latest 只同步游标、不重放历史", queue.after("latest").reports.length, 0);
+	const first = queue.push({ label: "阿码", summary: "写好了", ok: true, finishedAt: 1000 });
+	const second = queue.push({ label: "阿研", summary: "调研完了", ok: true, finishedAt: 1001 });
+	check("汇报按完成时间升序", queue.after(0).reports.map((row) => row.label), ["阿码", "阿研"]);
+	check("游标落在最后一条完成时刻", queue.after(0).cursor, second.at);
+	check("单调时刻保证第二条严格晚于第一条", second.at > first.at, true);
+	check("无 after 参数解析为 null", parseReportAfter("/plugins/dsh-voice-assistant/api/reports"), null);
+	check("latest 参数原样解析", parseReportAfter("/plugins/dsh-voice-assistant/api/reports?after=latest"), "latest");
+	check("数字参数原样解析", parseReportAfter("/api/reports?after=1234"), "1234");
+
+	check("规则摘要保留路径", deterministicSummary({ result: "文件在 D:\\a.py", ok: true }), "文件在 D:\\a.py。");
+	check("规则摘要说清失败原因", deterministicSummary({ ok: false, reason: "模型没配置" }), "任务失败，原因是模型没配置。");
+	check("播报文案带专家名", formatReportSpeech({ label: "阿码", summary: "文件在 D:\\a.py。", ok: true }), "阿码回报：文件在 D:\\a.py。");
+	check("失败文案不重复任务失败四字", formatReportSpeech({ label: "阿码", ok: false, reason: "工具不可用" }), "阿码：任务失败，原因是工具不可用。");
+
+	/** 造一个最小事件总线（只要 on/emit/get/logger）。 */
+	const makeCtx = () => {
+		const handlers = new Map();
+		return {
+			on(name, callback) {
+				const set = handlers.get(name) ?? new Set();
+				set.add(callback);
+				handlers.set(name, set);
+				return () => set.delete(callback);
+			},
+			emit(name, payload) {
+				for (const callback of handlers.get(name) ?? []) callback(payload);
+			},
+			get: () => undefined,
+			logger: { info() {}, warn() {} },
+		};
+	};
+
+	/** 造一个可控的 worker agent：followup 记录任务，finish() 模拟一轮完成。 */
+	const makeAgent = (ctx, id) => {
+		const state = { calls: [], idles: [], idleResolvers: [] };
+		const agent = {
+			id: `fake-agent-${id}`,
+			followup(payload) {
+				state.calls.push(payload);
+				// 完成信号在 followup 时就建好：真实 agent 也是"任务一投进去就开始计时"。
+				// 若等到 whenIdle() 才建，测试里先 finish 后 whenIdle 会丢信号。
+				state.idles.push(
+					new Promise((resolve) => {
+						state.idleResolvers.push(resolve);
+					}),
+				);
+			},
+			whenIdle() {
+				const index = state.calls.length - 1;
+				return state.idles[index] ?? Promise.resolve();
+			},
+			finish(index, text) {
+				ctx.emit("agent/assistant-stream", { agent, frame: { type: "start" } });
+				ctx.emit("agent/assistant-stream", { agent, frame: { type: "chunk", chunk: { type: "text-delta", text } } });
+				ctx.emit("agent/assistant-stream", { agent, frame: { type: "end", outcome: { kind: "committed" } } });
+				state.idleResolvers[index]?.();
+			},
+		};
+		return { agent, state };
+	};
+
+	const waitFor = async (predicate, timeout = 3000) => {
+		const deadline = Date.now() + timeout;
+		while (Date.now() < deadline) {
+			if (predicate()) return true;
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		return false;
+	};
+
+	// 同一 worker 连续两次派单：必须串行，否则后一任务会覆盖 liveText，
+	// 前一任务播报成后一任务的结论（界面上完全看不出串台）。
+	{
+		const ctx = makeCtx();
+		const { agent, state } = makeAgent(ctx, "coder");
+		const hub = createDelegationHub(ctx, normalizeConfig({}), {
+			workers: [{ id: "coder", label: "阿码", agent }],
+		});
+		const r1 = hub.submit("coder", "写第一个脚本");
+		check("委托当场返回成功", r1.ok, true);
+		check("任务立刻投进 worker", await waitFor(() => state.calls.length === 1), true);
+		const message = state.calls[0];
+		check("投给 worker 的是带 id 的消息", typeof message?.id === "string" && message.id !== "", true);
+		check("消息角色为 user", message?.role, "user");
+		check("消息来源可追溯", message?.source?.kind, "voice-router");
+		hub.submit("coder", "写第二个脚本");
+		await new Promise((resolve) => setTimeout(resolve, 60));
+		check("同一 worker 的第二条不会插队", state.calls.length, 1);
+		agent.finish(0, "第一件完成，文件在 D:\\one.py");
+		check("第一条完成后才投第二条", await waitFor(() => state.calls.length === 2), true);
+		agent.finish(1, "第二件完成，文件在 D:\\two.py");
+		check("两条汇报都入队", await waitFor(() => hub.queue.size === 2), true);
+		check(
+			"同一 worker 连续任务结果不串台",
+			hub.queue.after(0).reports.map((row) => row.result),
+			["第一件完成，文件在 D:\\one.py", "第二件完成，文件在 D:\\two.py"],
+		);
+		hub.dispose();
+	}
+
+	// 不同 worker 并行，但汇报按完成时间先后排队（用户明确要求 2）。
+	{
+		const ctx = makeCtx();
+		const coder = makeAgent(ctx, "coder-2");
+		const researcher = makeAgent(ctx, "researcher");
+		const hub = createDelegationHub(ctx, normalizeConfig({}), {
+			workers: [
+				{ id: "coder", label: "阿码", agent: coder.agent },
+				{ id: "researcher", label: "阿研", agent: researcher.agent },
+			],
+		});
+		hub.submit("researcher", "调研一份资料");
+		hub.submit("coder", "改一个 bug");
+		check("不同 worker 并行投递", await waitFor(() => coder.state.calls.length === 1 && researcher.state.calls.length === 1), true);
+		coder.agent.finish(0, "编程先完成，bug 已修好");
+		await new Promise((resolve) => setTimeout(resolve, 15));
+		researcher.agent.finish(0, "调研后完成，报告已写好");
+		check("两条汇报都入队", await waitFor(() => hub.queue.size === 2), true);
+		check(
+			"汇报顺序 = 完成时间先后，不是派单先后",
+			hub.queue.after(0).reports.map((row) => row.label),
+			["阿码", "阿研"],
+		);
+		hub.dispose();
+	}
+
+	// 卡住的任务必须有界收尾：worker 请求人工确认时 whenIdle() 永不 resolve，
+	// 没有超时就永远占住队列，用户听不到任何"失败"。
+	{
+		const ctx = makeCtx();
+		const agent = {
+			id: "fake-agent-stuck",
+			followup() {
+				// 起了轮，但永远不结束（等价于 approval/asked 挂着等人工点）。
+				ctx.emit("agent/assistant-stream", { agent, frame: { type: "start" } });
+			},
+			whenIdle: () => new Promise(() => {}),
+		};
+		const hub = createDelegationHub(ctx, { routing: { jobTimeoutMs: 60 } }, {
+			workers: [{ id: "stuck", label: "阿卡", agent }],
+		});
+		hub.submit("stuck", "请求提权写文件");
+		check("超时后仍给出汇报", await waitFor(() => hub.queue.size === 1, 3000), true);
+		const report = hub.queue.after(0).reports[0];
+		check("超时汇报标为失败", report?.ok, false);
+		check("超时原因如实说出", String(report?.reason).includes("未完成"), true);
+		check("超时后不再占用在途任务", hub.state().activeJobs.length, 0);
+		hub.dispose();
+	}
 }
 
 if (failures.length > 0) {

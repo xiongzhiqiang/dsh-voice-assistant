@@ -421,6 +421,15 @@ function renderPanel(controller, snapshot, onClose) {
 				: "已关闭",
 		),
 		row("休眠", `${Math.round(controller.config.sleep.idleTimeoutMs / 1000)} 秒无语音（播报完也按这个计时）`),
+		// V1.3 委托汇报：派单期间显示"处理中"，完成后这里留最近一条要点。
+		// 只看"专家路由"会以为派完单就没下文了 —— 用户需要一条可见的回执。
+		row(
+			"后台任务",
+			(snapshot.pendingDelegations ?? 0) > 0
+				? `${snapshot.pendingDelegations} 项处理中（完成后我会汇报要点）`
+				: "无在途任务",
+		),
+		row("最近汇报", snapshot.lastReport === "" ? "暂无" : snapshot.lastReport),
 		row("完成判据", `静音 ${Math.round((controller.config.turn?.silenceMs ?? 10000) / 1000)} 秒提交（单击语音球可立即提交）`),
 		row("回声抑制", controller.config.turn?.echoGuard === false ? "已关闭" : "已开启"),
 		// 常驻会话在侧边栏的标注名。为什么不是"隐藏"：DSH 没有安全的隐藏

@@ -1,37 +1,43 @@
 # dsh-voice-assistant —— 「小凤」语音助手
 
 > 让 DeepSeek Harness 从「打字对话」变成「对着电脑说话」：
-> 常驻待机 → 喊「小凤」唤醒 → 说话 → 自动润色 → **意图路由** → 进专家会话 →
-> 念出回答 → 静默 1 分钟自动休眠 → 提示音或 agent 消息把它叫回来。
+> 常驻待机 → 喊「小凤」唤醒 → 说话 → 自动润色 → **意图路由** → 派给后台专家 →
+> 只听专家回报的**一句要点** → 静默 1 分钟自动休眠。
 
-一个 DSH bundle 插件：宿主半（配置 / 润色 / **路由** / worker 专家 / 语音代理）+
+一个 DSH bundle 插件：宿主半（配置 / 润色 / 路由 / worker 专家 / **委托中枢** / 语音代理）+
 客户端半（浮层 / 状态机 / 唤醒 / 播报）。
 
-## 两层 agent 架构（V1.1 起，默认开启）
+## 两层 agent 架构（V1.3 现行行为）
 
-「小凤」本体是 **router（第一层）**，四位**常驻专家 agent 是 worker（第二层）**：
+「小凤」本体是 **router（第一层）**，三位**常驻专家 agent 是 worker（第二层）**。
+V1.1/1.2 会切到 worker 会话旁听每一步，V1.3 已按用户要求改成**只派单、只播报要点**：
 
 ```
 用户语音 → 润色(/api/polish) → 路由(/api/route, LLM 意图分类+任务改写)
                                      ↓ {worker, task}
-                switchTo(worker 会话) → prompt(task) → 事件订阅 → 播报
+              POST /delegate → worker.followup(identified message)（后台执行）
+                                     ↓ agent/assistant-stream（只抓最终答复）
+              LLM 汇总一句要点 → /reports?after=<cursor>
+                                     ↓
+                      小凤在原会话按完成时间先后依次播报
 ```
 
 | Worker | 会话 | 职责 |
 |---|---|---|
-| `general`（小凤·通用） | 根 agent 会话（兜底） | 闲聊、问答、杂项 |
-| `coder`（阿码·编程） | `session-voice-worker-coder` | 写代码、调试、重构、跑测试 |
-| `researcher`（阿研·调研） | `session-voice-worker-researcher` | 查资料、总结、写报告 |
+| `general`（小凤·通用） | 根 agent 会话（兜底，不委托） | 闲聊、问答、杂项 |
+| `coder`（阿码·编程） | `session-voice-worker-coder-v2` | 写代码、调试、重构、跑测试 |
+| `researcher`（阿研·调研） | `session-voice-worker-researcher-v2` | 查资料、总结、写报告 |
 | `operator`（阿卓·操作） | `session-voice-worker-operator` | 文件/目录、打开程序、执行命令 |
 
 设计要点（详见「架构注记」）：
 
 - 专家各自持有**独立 session 与 persona**，对话历史互不污染；
+- **不同 worker 并行、同一 worker 串行**；汇报按**完成时间**排队，与派单顺序无关；
+- worker 只在后台执行；中间过程、工具调用、提问都不播报，只回报结论；
+- 卡住的任务（如等待人工审批）在 `routing.jobTimeoutMs`（默认 5 分钟）后按失败汇报；
 - 路由失败/超时/关闭 → 一律落 `general` + 原文，用户无感、指令不丢；
-- 用户用跨会话功能**手动点名**的会话优先于自动路由（直到切回常驻）；
-- 路由自己发起的切换带 `routerPinned` 标记——每条指令都会重新路由；
-- 配置：`cordis.patch.yml` 的 `routing:` 段（`enabled` / `timeoutMs` / `workers` 清单，
-  未配置时用上表默认四位；`general` 恒在、指向根 agent）。
+- 配置：`cordis.patch.yml` 的 `routing:` 段（`enabled` / `timeoutMs` / `jobTimeoutMs` /
+  `reportPollMs` / `workers` 清单，未配置时用上表默认四位）。
 
 ---
 
@@ -368,7 +374,8 @@ dsh plugin --profile web add "$PWD"
 node tests/host.test.mjs            # 宿主纯逻辑：配置归一化、密钥不外泄、规则清理、润色跑偏检测
 node tests/client-core.test.mjs     # 状态机、唤醒词匹配、播报文本清洗、事件形状契约
 node tools/smoke-bundle.mjs         # 客户端 bundle 语法/模块表/apply/卸载清理
-node tools/smoke-host.mjs           # 宿主半在 fake ctx 上跑通四条 API 端点
+node tools/smoke-host.mjs           # 宿主半在 fake ctx 上跑通 API 端点
+node tools/smoke-delegation-http.mjs # V1.3 真机派单 → 回报 → 按完成时间播报
 node tools/smoke-agent-route.mjs    # 常驻 agent 模型路由（钉死最隐蔽的坑）
 node build.mjs --check              # 只校验不写盘
 node tools/verify-live.mjs          # 对运行中的 dsh 做装机验收（需要 dsh 已启动）
@@ -1273,6 +1280,32 @@ agent-loop `await`，允许 async）+ 配置项 `agent.preset`（默认 `standar
 排障第一步永远是让用户**硬刷新页面**；服务端 `/api/route` 回放可以先把
 "路由器本身坏没坏"与"客户端接没接上"分开。
 
+**坑十四：派单消息必须是 DSH 的 identified message。**
+
+（V1.3 真机）`agent.followup()` 传裸对象 `{content, source}` 当时能跑，任务也确
+实完成了；但消息会被写进 `agent/inbox/spliced` 并持久化，下次启动 resume 时
+`dsh-session` 的 `assertMessageEventShape` 直接抛
+`session event at seq N lacks an identified message`。症状极具误导性：health 里
+worker 报 `session already exists`，看起来像会话重复；真正原因是**上次写入的
+历史事件非法**。修法：`lib/messages.js` 优先复用官方
+`createUserMessage()`（从 `DSH_HOME/profiles/<profile>/package.json` 建
+`createRequire` 解析，插件真实路径上没有 `@deepseek-ai/*`），拿不到时用
+`randomUUID()` 生成满足全部校验不变量的本地消息。已损坏的旧会话做备份后
+换新 session id（`-v2` 后缀）绕开，不继承不合法历史。
+
+**坑十五：worker 初始化链上的两个"永不返回"。**
+
+- `rootCtx.inject(["workspaceRegistry"], cb)` 的回调可能**永不触发**：agent 明明
+  已经建好（进度探针显示 `source: resumed` / `model: deepseek/...`），整层却
+  永远停在第一个 worker 上，health 只剩 `general` 占位，也没有任何异常。
+- 单个 worker 卡住会**连坐整层**：`ensureWorkerAgents` 是顺序循环，一个不返回，
+  后面的 researcher/operator 全都不会注册。
+
+修法三处：① 归档自愈这类**可选**防线加 3s 超时，超时只把
+`{reason:"archive-fix-timeout"}` 写进 health，不阻断注册；② 单个 worker 建立
+加 30s 超时；③ `ensureWorkerAgents` 支持 `onProgress` 逐项上报，任何时刻都能从
+health 看到卡在谁、卡在哪一步（这是从"零信息空数组"里爬出来的关键）。
+
 ---
 
 ## 八、已知边界
@@ -1325,11 +1358,14 @@ index.js                    宿主半入口：配置归一化、配置下发、A
 lib/config.js               配置归一化 + 客户端白名单裁剪（含 turn 的夹取与语义保护）
 lib/identity.js             宿主半身份：常驻会话可见性标注 + 全局记忆注册 + **归档自愈**（含「隐藏不可行」证伪表）
 lib/agent.js                常驻 agent：模型路由解析/落盘、人格段、**preset 挂载（mountAgentPreset）**、生命周期
-lib/workers.js              worker 专家层：默认四位专家、归一化、批量建立（复用 ensurePersistentAgent；标注+归档自愈与根 agent 一致）
+lib/workers.js              worker 专家层：默认四位专家、归一化、批量建立（逐项进度 + 建立/归档自愈双超时）
 lib/router.js               意图路由（两层第一层）：LLM 意图分类 + 任务改写；严格 JSON + 白名单 + general 兜底
+lib/messages.js             identified message 工厂：优先官方 createUserMessage，兜底随机 id（坑十四）
+lib/delegation.js           V1.3 委托中枢：派单、结果捕获、LLM 汇总、同 worker 串行/不同 worker 并行、任务超时
+lib/report.js               V1.3 汇报队列：严格单调游标、规则降级摘要、可朗读文案
 lib/polish.js               转录润色（llm.stream）+ 跑偏检测 + 规则兜底
 lib/upstream.js             OpenAI 兼容 ASR/TTS 代理
-lib/routes.js               /health /config /polish /route /asr /tts
+lib/routes.js               /health /config /polish /route /delegate /reports /asr /tts
 src/client/index.js         客户端入口：装配、快捷键、卸载
 src/client/core/machine.js  六态状态机（纯函数，可脱离浏览器测试）
 src/client/core/wakeword.js 唤醒词同音匹配 + 指令切分

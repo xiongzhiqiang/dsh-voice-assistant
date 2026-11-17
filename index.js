@@ -35,6 +35,7 @@ import { clientConfig, normalizeConfig } from "./lib/config.js";
 import { API_PREFIX, installApiRoutes } from "./lib/routes.js";
 import { agentInfo, ensurePersistentAgent } from "./lib/agent.js";
 import { ensureWorkerAgents } from "./lib/workers.js";
+import { createDelegationHub } from "./lib/delegation.js";
 import { labelAgentSession, registerGlobalMemory, ensureSessionNotArchived } from "./lib/identity.js";
 
 /** 插件名（fiber 诊断与日志前缀）。 */
@@ -56,6 +57,17 @@ const CLIENT_CONFIG_GLOBAL = "__VOICE_ASSISTANT_CONFIG__";
  */
 export function apply(ctx, config = {}) {
 	const normalized = normalizeConfig(config);
+
+	/**
+	 * 委托中枢（V1.3）：router 提交任务 → worker 后台执行 → 要点汇总入队 →
+	 * 客户端按完成先后播报。构造时还没有 worker agent（异步建），由建好的
+	 * 结果回调里 `addWorker()` 注册；事件监听在根 ctx 上，插件卸载时释放。
+	 */
+	const delegation = createDelegationHub(ctx, normalized);
+	ctx.effect(() => () => delegation.dispose(), "voice-assistant: 委托中枢生命周期");
+
+	/** worker id → 展示名（委托汇报要用真人可读的「阿码」而不是 `coder`）。 */
+	const workerLabel = (id) => normalized.routing.workers.find((worker) => worker.id === id)?.label ?? id;
 
 	/** 常驻 agent 的运行态（get/create 之间为 pending）。 */
 	let agentRef = null;
@@ -80,6 +92,8 @@ export function apply(ctx, config = {}) {
 	 * 为假时恒为空数组 = 两层架构关闭）。
 	 */
 	let workersStatus = [];
+	/** Worker 层整体失败原因（catch 必须留可见结论，否则真实错误被日志吞掉）。 */
+	let workersError = "";
 	/**
 	 * 根 agent 的 preset 挂载结果（坑十三：不挂 preset 的 agent 没有文件/命令
 	 * 工具；health 可见，`{mounted,id?|reason?}`）。
@@ -113,8 +127,21 @@ export function apply(ctx, config = {}) {
 			/** 两层架构：路由开关 + worker 专家清单及各自就绪状态。 */
 			routing: {
 				enabled: normalized.routing.enabled,
-				workers: workersStatus,
+				error: workersError,
+				// 只下发可 JSON 化的字段 —— worker 结果里带 agent 实例引用
+				// （V1.3 委托用），直接塞进 health 会序列化失败或泄漏内部对象。
+				workers: workersStatus.map((row) => ({
+					id: row.id,
+					ok: row.ok,
+					source: row.source,
+					model: row.model,
+					error: row.error,
+					archivedFix: row.archivedFix,
+					preset: row.preset,
+				})),
 			},
+			/** V1.3 委托中枢自省（worker 数、在途任务、汇报游标）。 */
+			delegation: delegation.state(),
 			capabilities: {
 				polishAvailable: typeof llm?.stream === "function" && polishModel !== "",
 				polishModel,
@@ -168,19 +195,31 @@ export function apply(ctx, config = {}) {
 			//      互不依赖（各自独立 session），且单个 worker 失败不连坐。
 			//      路由关闭时清单纯占位（general 指向根 agent，无需建）。
 			if (normalized.routing.enabled) {
-				ensureWorkerAgents(ctx, scope, normalized, normalized.routing.workers)
+				ensureWorkerAgents(ctx, scope, normalized, normalized.routing.workers, (row) => {
+				// 逐项上报：worker 层若卡在某一个 agent 上，health 里仍能看见
+				// 已经完成的前几位，不会只剩一个空数组让人无从下手。
+				workersStatus = [...workersStatus.filter((item) => item.id !== row.id), row];
+			})
 					.then((results) => {
 						workersStatus = results;
+						// V1.3：把建成且有实例引用的 worker 注册进委托中枢，
+						// 这样 /delegate 才能把任务投进它们的 inbox。
+						for (const row of results) {
+							if (row.agent !== undefined && row.agent !== null) {
+								delegation.addWorker({ id: row.id, label: workerLabel(row.id), agent: row.agent });
+							}
+						}
 						const ready = results.filter((row) => row.ok === true).length;
 						const total = results.length - 1; // general 不单建。
 						scope.logger?.info?.(
-							`voice-assistant: worker 专家层就绪（${ready}/${total} 可用${total === ready ? "" : "，未就绪的路由会跳过"}）`,
+							`voice-assistant: worker 专家层就绪（${ready}/${total} 可用${total === ready ? "" : "，未就绪的路由会跳过"}），委托中枢已登记 ${delegation.workers.size} 位`,
 						);
 					})
 					.catch((error) => {
 						workersStatus = [];
+						workersError = String(error?.message ?? error);
 						scope.logger?.warn?.(
-							`voice-assistant: worker 专家层建立失败（路由将全部落 general）—— ${String(error?.message ?? error)}`,
+							`voice-assistant: worker 专家层建立失败（路由将全部落 general）—— ${workersError}`,
 						);
 					});
 			}
@@ -316,7 +355,7 @@ export function apply(ctx, config = {}) {
 		// 2) 本机 API。注册失败（前缀冲突）只告警：语音球仍能工作，
 		//    只是润色退化为规则清理、上游 ASR/TTS 不可用。
 		try {
-			const dispose = installApiRoutes(scope, normalized, state);
+			const dispose = installApiRoutes(scope, normalized, state, delegation);
 			scope.effect(() => dispose, "voice-assistant: 本机 API");
 		} catch (error) {
 			scope.logger?.warn?.(`voice-assistant: API 路由注册失败，将退化为纯浏览器语音链路 —— ${error?.message ?? error}`);

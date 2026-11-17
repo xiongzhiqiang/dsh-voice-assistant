@@ -18,6 +18,8 @@ _probe-bundle.js
 tools/_spike.txt
 tools/_*.txt
 tools/research/_scan.txt
+# V1.3 排障时备份的损坏会话（含历史消息，不入库）
+tools/_session_backup/
 
 # ── 配置备份（含历史配置，非源码）─────────────────────────
 *.bak
