@@ -1306,6 +1306,35 @@ worker 报 `session already exists`，看起来像会话重复；真正原因是
 加 30s 超时；③ `ensureWorkerAgents` 支持 `onProgress` 逐项上报，任何时刻都能从
 health 看到卡在谁、卡在哪一步（这是从"零信息空数组"里爬出来的关键）。
 
+**坑十六：在 `sessions/` 里给会话目录改名 = 炸掉整个工作区。**
+
+排障时为"腾开"损坏的 worker 会话，把目录就地改名成
+`session-voice-worker-coder.broken-20261117`。zstd 日志里的 `header.id` 仍是旧名，
+**目录名与 header.id 错配**，DSH 的 `session-persistence-jsonl` 在
+`assertStoredIdentity` 直接抛：
+
+```
+corrupt session log "...\session-voice-worker-coder.broken-20261117\session.v4.jsonl.zstd":
+  header id "session-voice-worker-coder" and cwd identify "...\session-voice-worker-coder\..."
+```
+
+后果**不是**"跳过这一个会话"，而是 `workspace` 插件激活失败 →
+`workspaceRegistry` 服务不存在 → **侧栏所有会话消失、新建会话也建不出来**，
+看起来像数据被删光了（数据其实完好）。而且症状会伪装成别的问题：
+worker 的归档自愈 `inject` 拿不到 `workspaceRegistry`，于是报
+`archive-fix-timeout`，把我们引向"worker 初始化"这条错误线索。
+
+两条纪律：
+
+1. **坏会话要"移出 `sessions/`"，绝不在原地改名**——改名必然制造错配。
+2. 工作区会话消失/无法新建时，**先跑 `npm run check:sessions`**，
+   一秒区分"扫描器被噎住"与"数据真丢了"。
+
+工具：`tools/check-session-integrity.mjs` —— 逐目录解压第一帧，比对
+`header.id === 目录名`，不一致即退出码 1（这个判据也进 `npm run verify` 闸门）。
+已确认**不能**顺手查 cwd 一致性：组目录名是路径的有损编码，反推必然误报
+（实测会把 41 个正常会话全标红，把真问题淹掉），所以只保留能确证的那一条。
+
 ---
 
 ## 八、已知边界
@@ -1394,6 +1423,7 @@ tools/smoke-questions.mjs   提问旁听 + 语音作答真机验证（需求 12 
 tools/probe-local-ears.mjs  本地 Whisper 接线真机探针（dsh-ears 命名空间 / 后端清单 / 需要 WAV；含**时序验证**：晚 6s 重探区分"时序竞争"与"注册名错"）
 tools/probe-local-whisper.mjs 本地 Whisper **环境**探针（原生运行时 / 模型 sha256 / 音频格式闸门 / 真机推理），`--silence` 只验前两层
 tools/cdp-probe.mjs         真浏览器端到端：DOM 探测 + ask spike + 诊断（fails/prompts/hydration/turn/echo/questionBridge）
+tools/check-session-integrity.mjs 会话存储自检：逐目录比对 header.id 与目录名，不一致即退出码 1（坑十六；也叫 `npm run check:sessions`，已进 verify 闸门）
 tools/research/             只读调研脚本（探 DSH 运行时契约，如会话列表读面、origin 用法）
 tools/research/probe-question-projection.mjs  用**真机发布的折叠函数**证明 legacy 模式投影恒空（根因证据 ①）
 tools/research/probe-ask-user-logs.mjs        扫盘上会话日志，证明问题真在发生但 schema 全 legacy（根因证据 ②）
