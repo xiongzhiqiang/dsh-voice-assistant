@@ -210,9 +210,9 @@ if (typeof askText === "string" && askText !== "") {
 			console.log("snapshot:", snap);
 		}
 		if (parsed !== null) {
-			console.log(
-				`  [${parsed.status}] session=${parsed.sessionId} answer=${parsed.answer.slice(0, 120)} partial=${parsed.partial.slice(0, 60)} notice=${parsed.notice} error=${parsed.error}`,
-			);
+				console.log(
+					`  [${parsed.status}] session=${parsed.sessionId} target=${parsed.sessionTarget?.mode ?? "?"}:${parsed.sessionTarget?.id ?? "?"} routed=${parsed.routedWorker ?? ""} pending=${parsed.pendingDelegations ?? 0} answer=${parsed.answer.slice(0, 120)} partial=${parsed.partial.slice(0, 60)} notice=${parsed.notice} error=${parsed.error}`,
+				);
 			// 只有真正拿到回答、或整个链路终止（off/sleeping）才退出；
 			// standby 可能只是"润色还没回来"，提前退出会误判成失败。
 			if (parsed.answer !== "" && parsed.status !== "thinking") break;

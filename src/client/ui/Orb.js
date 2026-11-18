@@ -31,6 +31,13 @@ const LONG_PRESS_MS = 600;
 /** 球形图标路径（声波）。 */
 const GLYPH = "M12 3v18M8 7v10M16 7v10M4 10v4M20 10v4";
 
+/** 状态标签：把互动类型翻成用户一眼能懂的名字（需求④）。 */
+const LAST_KIND_LABEL = {
+	approval: "最近互动（权限审核）",
+	question: "最近互动（模型提问）",
+	report: "最近互动（任务汇报）",
+};
+
 /** 状态的简短操作提示。 */
 const HINTS = {
 	[STATES.OFF]: "单击启用语音",
@@ -421,6 +428,27 @@ function renderPanel(controller, snapshot, onClose) {
 				: "已关闭",
 		),
 		row("休眠", `${Math.round(controller.config.sleep.idleTimeoutMs / 1000)} 秒无语音（播报完也按这个计时）`),
+		// V1.3 委托汇报：派单期间显示"处理中"，完成后这里留最近一条要点。
+		// 只看"专家路由"会以为派完单就没下文了 —— 用户需要一条可见的回执。
+		row(
+			"后台任务",
+			(snapshot.pendingDelegations ?? 0) > 0
+				? `${snapshot.pendingDelegations} 项处理中（完成后我会汇报要点）`
+				: "无在途任务",
+		),
+		// 需求④：三类互动（审批 / 提问 / 汇报）走**同一条按时间的流**，
+		// 这条留的是最近一条的原话。标签随类型变 —— 都写"最近汇报"会让
+		// 用户以为念的是任务结果，实际可能是"某工具需要你去界面允许"。
+		row(LAST_KIND_LABEL[String(snapshot.lastInteractionKind ?? "")] ?? "最近互动", snapshot.lastReport === "" ? "暂无" : snapshot.lastReport),
+		// 互动流的总闸 + 两类旁听的开关（与宿主侧配置同口径，只读展示）。
+		// 为什么把"不做语音代答"写死在这里：用户会对着屏幕喊"允许"，
+		// 提前说清比事后解释便宜。
+		row(
+			"互动流",
+			controller.config.interactions?.enabled === false
+				? "已关闭（不播报审批 / 提问 / 汇报）"
+				: `已开启（审批 ${controller.config.interactions?.announceApprovals === false ? "关" : "开"}，提问 ${controller.config.interactions?.announceQuestions === false ? "关" : "开"}；只播报，不代答）`,
+		),
 		row("完成判据", `静音 ${Math.round((controller.config.turn?.silenceMs ?? 10000) / 1000)} 秒提交（单击语音球可立即提交）`),
 		row("回声抑制", controller.config.turn?.echoGuard === false ? "已关闭" : "已开启"),
 		// 常驻会话在侧边栏的标注名。为什么不是"隐藏"：DSH 没有安全的隐藏

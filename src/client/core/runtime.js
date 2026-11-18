@@ -23,8 +23,10 @@ const FALLBACK = {
 	session: { mode: "dedicated", requestedMode: "dedicated", title: "小凤语音会话", workspace: "", label: "小凤 · 常驻助手" },
 	agent: { enabled: false, sessionId: "", personaActive: false, steer: true },
 	// 两层架构：宿主缺失时路由视为关闭（没有 worker 可切）。
-	routing: { enabled: false, workers: [] },
+	routing: { enabled: false, workers: [], reportPollMs: 1500 },
 	answers: { questionTimeoutMs: 60000, chime: true, repeatOnce: true },
+	// 需求④统一互动流：宿主缺失时视为关闭（没有宿主就没有审批/汇报可播）。
+	interactions: { enabled: false, announceApprovals: true, announceQuestions: true, pollMs: 1500 },
 	// 全局记忆。宿主缺失时一律视为未生效 —— 它本来就只能在宿主侧注册，
 	// 这里给 `global:false` 是为了让面板有一句确定的"未开启"而不是 `undefined`。
 	memory: { global: false, active: false },
@@ -66,6 +68,7 @@ export function readConfig() {
 			agent: { ...base.agent, ...(injected.agent ?? {}) },
 			routing: { ...base.routing, ...(injected.routing ?? {}) },
 			answers: { ...base.answers, ...(injected.answers ?? {}) },
+			interactions: { ...base.interactions, ...(injected.interactions ?? {}) },
 			memory: { ...base.memory, ...(injected.memory ?? {}) },
 			turn: { ...base.turn, ...(injected.turn ?? {}) },
 			ui: { ...base.ui, ...(injected.ui ?? {}) },
@@ -136,6 +139,49 @@ export async function route(text) {
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify({ text }),
 	});
+	return response.json();
+}
+
+/**
+ * V1.3：把任务委托给 worker 后台执行（当场返回，不切会话）。
+ * @param worker - worker id。
+ * @param task - 路由改写后的任务文本。
+ * @returns `{ ok, jobId?, workerId, label?, error? }`。
+ */
+export async function delegate(worker, task) {
+	const response = await request("/delegate", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ worker, task }),
+	});
+	return response.json();
+}
+
+/**
+ * V1.3：按 after 游标取回 worker 的完成要点（按完成时间升序）。
+ * @param after - 毫秒时间戳，或 `"latest"`（首帧只取游标、不重放历史）。
+ * @returns `{ reports: [{seq,at,label,summary,ok,speech,...}], cursor }`。
+ */
+export async function reports(after) {
+	const query = after === undefined || after === null ? "" : `?after=${encodeURIComponent(String(after))}`;
+	const response = await request(`/reports${query}`, { method: "GET" });
+	return response.json();
+}
+
+/**
+ * 需求④：按 `at` 游标取回**统一互动流**（权限审核 / 模型提问 / 结果汇报）。
+ *
+ * 与 `reports()` 并存而不是取而代之：`reports` 仍被既有调用与冒烟脚本
+ * 使用；这条流是"需要用户知道的事"的更宽口径。两者数据有重叠（汇报），
+ * 但客户端只**播报其中一条**（见 controller 的 `interactionCursor` 注释），
+ * 否则同一条汇报会被念两遍。
+ *
+ * @param after - 毫秒时间戳，或 `"latest"`（首帧只取游标、不重放历史）。
+ * @returns `{ interactions: [{seq,at,kind,key,label,speech,detail}], cursor }`。
+ */
+export async function interactions(after) {
+	const query = after === undefined || after === null ? "" : `?after=${encodeURIComponent(String(after))}`;
+	const response = await request(`/interactions${query}`, { method: "GET" });
 	return response.json();
 }
 

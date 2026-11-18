@@ -41,6 +41,13 @@ function makeCtx(options = {}) {
 			if (name === "agentDefaultModel" && options.defaultModel) return options.defaultModel;
 			return undefined;
 		},
+		// 委托中枢在根 ctx 上挂事件与生命周期，fake 必须提供这两条。
+		effect(factory) {
+			return factory();
+		},
+		on() {
+			return () => {};
+		},
 		inject(deps, callback) {
 			injected.push(deps);
 			const scope = {

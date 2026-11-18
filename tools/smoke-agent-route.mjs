@@ -90,7 +90,9 @@ function makeRegistry(log) {
 		async create(options) {
 			log.push({ call: "create", options });
 			const agent = makeAgent(options.sessionId);
-			options.setup?.({ get: () => undefined, on: () => () => {}, effect: () => () => {} }, agent);
+			// 真机 agent-loop 会 await setup；fake 也必须 await，否则 async
+			// composeAgentScope 还没写完 model，modelApplied 就被读成 false。
+			await options.setup?.({ get: () => undefined, on: () => () => {}, effect: () => () => {} }, agent);
 			if (options.meta !== undefined) agent.__meta = options.meta;
 			store.set(options.sessionId, agent);
 			return { agent, dispose: () => {} };
@@ -99,7 +101,9 @@ function makeRegistry(log) {
 			log.push({ call: "resume", options });
 			if (options.failResume === true) throw new Error("no persisted session");
 			const agent = makeAgent(options.resumeSessionId);
-			options.setup?.({ get: () => undefined, on: () => () => {}, effect: () => () => {} }, agent);
+			// 真机 agent-loop 会 await setup；fake 也必须 await，否则 async
+			// composeAgentScope 还没写完 model，modelApplied 就被读成 false。
+			await options.setup?.({ get: () => undefined, on: () => () => {}, effect: () => () => {} }, agent);
 			store.set(options.resumeSessionId, agent);
 			return { agent, dispose: () => {} };
 		},
@@ -209,6 +213,39 @@ const cfg = (agentPatch = {}) => normalizeConfig({ agent: { sessionId: "session-
 	check("live 路径回报已写入", result.modelApplied === true, String(result.modelApplied));
 }
 
+// ── 5.5 resume 早于持久化就绪 → create 报 already exists → 回头重 resume ─
+{
+	const sessionId = "session-resume-race";
+	const agent = makeAgent(sessionId);
+	let resumeCalls = 0;
+	let createCalls = 0;
+	const registry = {
+		get: () => undefined,
+		async resume() {
+			resumeCalls += 1;
+			if (resumeCalls === 1) throw new Error("session persistence not ready");
+			return { agent, dispose: () => {} };
+		},
+		async create() {
+			createCalls += 1;
+			throw new Error("session already exists");
+		},
+	};
+	const ctx = {
+		logger: silentLogger,
+		get(name) {
+			if (name === "agents") return registry;
+			if (name === "sessionPersistence") return {};
+			if (name === "agentDefaultModel") return { currentSelection: () => ({ provider: "deepseek", model: "deepseek-flash" }) };
+			return undefined;
+		},
+	};
+	const result = await ensurePersistentAgent(ctx, cfg({ sessionId }));
+	check("已存在时回头重试 resume", resumeCalls >= 2, `resume=${resumeCalls}, create=${createCalls}`);
+	check("重试后拿回原 agent", result.agent === agent, String(result.agent === agent));
+	check("来源如实标记为重试恢复", result.source === "resumed-after-exists", result.source);
+}
+
 // ── 6. 拿不到路由时如实报告，不许假装成功 ──────────────────────────────
 {
 	const log = [];
@@ -238,9 +275,9 @@ const cfg = (agentPatch = {}) => normalizeConfig({ agent: { sessionId: "session-
 
 // ── 8. composeAgentScope 不因缺服务崩掉 ───────────────────────────────
 {
-	const outcome = composeAgentScope({ get: () => undefined }, cfg(), {}, makeAgent());
+	const outcome = await composeAgentScope({ get: () => undefined }, cfg(), {}, makeAgent());
 	check("composeAgentScope 无 systemPrompt 也不崩", outcome !== undefined);
-	const withPersona = composeAgentScope({ get: () => undefined }, normalizeConfig({}), {}, makeAgent());
+	const withPersona = await composeAgentScope({ get: () => undefined }, normalizeConfig({}), {}, makeAgent());
 	check("无注入 ctx 时 modelApplied 为假（无服务可取）", withPersona.modelApplied === false, String(withPersona.modelApplied));
 }
 

@@ -1,37 +1,104 @@
 # dsh-voice-assistant —— 「小凤」语音助手
 
 > 让 DeepSeek Harness 从「打字对话」变成「对着电脑说话」：
-> 常驻待机 → 喊「小凤」唤醒 → 说话 → 自动润色 → **意图路由** → 进专家会话 →
-> 念出回答 → 静默 1 分钟自动休眠 → 提示音或 agent 消息把它叫回来。
+> 常驻待机 → 喊「小凤」唤醒 → 说话 → 自动润色 → **意图路由** → 派给后台专家 →
+> 只听专家回报的**一句要点** → 静默 1 分钟自动休眠。
 
-一个 DSH bundle 插件：宿主半（配置 / 润色 / **路由** / worker 专家 / 语音代理）+
-客户端半（浮层 / 状态机 / 唤醒 / 播报）。
+一个 DSH bundle 插件：宿主半（配置 / 润色 / 路由 / worker 专家 / **专家技能** /
+**委托中枢** / **互动中枢** / 语音代理）+ 客户端半（浮层 / 状态机 / 唤醒 / 播报）。
 
-## 两层 agent 架构（V1.1 起，默认开启）
+版本：`1.4.0`（V1.4 = V1.3 派单链 + 需求①专家技能与自加入口 + 需求④统一互动流）。
 
-「小凤」本体是 **router（第一层）**，四位**常驻专家 agent 是 worker（第二层）**：
+## 两层 agent 架构（V1.4 现行行为）
+
+「小凤」本体是 **router（第一层）**，五位**常驻专家 agent 是 worker（第二层）**。
+V1.1/1.2 会切到 worker 会话旁听每一步，V1.3 已按用户要求改成**只派单、只播报要点**；
+V1.4 加上**专家技能**与**统一互动流**：
 
 ```
 用户语音 → 润色(/api/polish) → 路由(/api/route, LLM 意图分类+任务改写)
                                      ↓ {worker, task}
-                switchTo(worker 会话) → prompt(task) → 事件订阅 → 播报
+              POST /delegate → worker.followup(identified message)（后台执行）
+                                     ↓ agent/assistant-stream（只抓最终答复）
+              LLM 汇总一句要点 → 进「互动流」队列
+                                     ↓
+   /interactions?after=<cursor> ────┬── 结果汇报（只听结论）
+                                    ├── 权限审核（去界面允许/拒绝）
+                                    └── 模型提问（去界面作答）
+                                     ↓
+                      小凤按 at 严格升序依次播报（听到的顺序 = 发生的顺序）
 ```
 
-| Worker | 会话 | 职责 |
-|---|---|---|
-| `general`（小凤·通用） | 根 agent 会话（兜底） | 闲聊、问答、杂项 |
-| `coder`（阿码·编程） | `session-voice-worker-coder` | 写代码、调试、重构、跑测试 |
-| `researcher`（阿研·调研） | `session-voice-worker-researcher` | 查资料、总结、写报告 |
-| `operator`（阿卓·操作） | `session-voice-worker-operator` | 文件/目录、打开程序、执行命令 |
+| Worker | 会话 | 职责 | 技能 |
+|---|---|---|---|
+| `general`（小凤·通用） | 根 agent 会话（兜底，不委托） | 闲聊、问答、杂项 | — |
+| `bioinfo`（小因·基因分析） | `session-voice-worker-bioinfo-v2` | 体细胞突变检测/注释、变异临床分级、可靶向性、出报告 | `somatic-mutation-report` |
+| `coder`（阿码·编程） | `session-voice-worker-coder-v2` | 写代码、调试、重构、跑测试 | — |
+| `researcher`（阿研·调研） | `session-voice-worker-researcher-v2` | 查资料、总结、写报告 | — |
+| `operator`（阿卓·操作） | `session-voice-worker-operator` | 文件/目录、打开程序、执行命令 | — |
 
 设计要点（详见「架构注记」）：
 
 - 专家各自持有**独立 session 与 persona**，对话历史互不污染；
+- **不同 worker 并行、同一 worker 串行**；汇报按**完成时间**排队，与派单顺序无关；
+- worker 只在后台执行；中间过程、工具调用不播报，只回报结论；
+- **专家能力 = 挂哪些技能**（不是 persona 里塞多少字）：技能走 DSH 的两段式
+  加载（catalog 常驻、正文按需），且**注册在该 agent 的作用域**，其它会话看不见；
+- 需要用户介入的三类事走**同一条按时间排序的流**（审批 / 提问 / 汇报），
+  顺序由 `at` 决定而不是由哪条通道先跑完决定；
+- **权限审核只播报、不语音代答**：误听一句"允许"去放行有副作用的操作，
+  代价是真实的，所以语音只负责提醒你去界面；
+- 卡住的任务（如等待人工审批）在 `routing.jobTimeoutMs`（默认 5 分钟）后按失败汇报；
 - 路由失败/超时/关闭 → 一律落 `general` + 原文，用户无感、指令不丢；
-- 用户用跨会话功能**手动点名**的会话优先于自动路由（直到切回常驻）；
-- 路由自己发起的切换带 `routerPinned` 标记——每条指令都会重新路由；
-- 配置：`cordis.patch.yml` 的 `routing:` 段（`enabled` / `timeoutMs` / `workers` 清单，
-  未配置时用上表默认四位；`general` 恒在、指向根 agent）。
+- 配置：`cordis.patch.yml` 的 `routing:` 段（`enabled` / `timeoutMs` / `jobTimeoutMs` /
+  `reportPollMs` / `workers` / `experts` / `expertDirs`）与 `interactions:` 段
+  （`enabled` / `announceApprovals` / `announceQuestions` / `pollMs` / `limit`）。
+
+### 自己加一位专家（需求①的入口）
+
+三种方式，**按 id 去重、先到先得**（写在前面的胜出）：
+
+| 方式 | 怎么写 | 适合 |
+|---|---|---|
+| `routing.workers` | YAML 内联数组，最直接 | 一次性配置 |
+| `routing.experts` | 同格式的语义化别名 | 同上，读起来更清楚 |
+| `routing.expertDirs` | 目录，每个 `*.json` 是一位专家 | **丢文件即生效，不必改 YAML** |
+
+```yaml
+# cordis.patch.yml
+# voice-assistant:
+#   config:
+#     routing:
+#       expertDirs:
+#         - C:/Users/me/.dsh/voice-assistant/experts
+```
+
+```json
+// <expertDirs>/chem.json —— 丢进目录就是一位新专家
+{ "id": "chem", "label": "小化 · 化学", "description": "分子建模与性质预测。" }
+```
+
+**目录是「追加」而不是「替换」**：只配了目录时，默认五位专家一位不少，目录里
+同 id 的文件会覆盖默认那位（只改 `label` 也行，人格/描述/技能自动继承模板）。
+内联写了 `workers`/`experts` 则是**完整花名册**（严格按你写的来），目录只补新 id。
+
+技能名写错、JSON 写坏都不会让整层塌掉：坏文件被跳过并记进 `problems`，
+启动日志里逐条可见，`/health.routing.problems` 也能查到。
+
+### 给专家加技能
+
+技能目录（`<name>/SKILL.md`，**只扫一层**）：
+
+| 来源 | 位置 | 说明 |
+|---|---|---|
+| 插件内置 | `<插件>/skills/<name>/SKILL.md` | 随 git 走，装插件即生效 |
+| 用户技能 | `$DSH_HOME/voice-assistant/skills/<name>/SKILL.md` | 自己丢文件 |
+| 用户单文件 | `$DSH_HOME/voice-assistant/skills/<name>.md` | 同上 |
+
+frontmatter 需要 `name`（小写+连字符）与 `description`；正文就是流程纪律。
+注册发生在**该 agent 的 `setup` 里**，所以只在专家自己的会话可见 ——
+`/health.routing.workers[].skills` 会如实报出 `declared` / `available` /
+`registered` / `missing`，别只看 `available`（"扫到了"不等于"挂上了"）。
 
 ---
 
@@ -367,22 +434,24 @@ dsh plugin --profile web add "$PWD"
 ```sh
 node tests/host.test.mjs            # 宿主纯逻辑：配置归一化、密钥不外泄、规则清理、润色跑偏检测
 node tests/client-core.test.mjs     # 状态机、唤醒词匹配、播报文本清洗、事件形状契约
+node tests/experts.test.mjs         # 专家技能扫描/注册、多来源合并、统一互动流（需求①④）
 node tools/smoke-bundle.mjs         # 客户端 bundle 语法/模块表/apply/卸载清理
-node tools/smoke-host.mjs           # 宿主半在 fake ctx 上跑通四条 API 端点
+node tools/smoke-host.mjs           # 宿主半在 fake ctx 上跑通 API 端点
+node tools/smoke-delegation-http.mjs # V1.4 真机派单 → 回报 → 互动流按时间播报
 node tools/smoke-agent-route.mjs    # 常驻 agent 模型路由（钉死最隐蔽的坑）
 node build.mjs --check              # 只校验不写盘
 node tools/verify-live.mjs          # 对运行中的 dsh 做装机验收（需要 dsh 已启动）
 node tools/cdp-probe.mjs "http://127.0.0.1:3080/?token=…" 12   # 真浏览器抓控制台异常
 ```
 
-前五个是**纯逻辑层**，不需要 dsh 在跑，几十毫秒出结果，改代码后先跑这一组。
+前六个是**纯逻辑层**，不需要 dsh 在跑，几十毫秒出结果，改代码后先跑这一组。
 后两个需要真机，用来补纯逻辑层看不见的缺口。
 
 ### 五层各自钉死什么
 
 | 层 | 覆盖的问题 | 静态测试为什么看不见 |
 |---|---|---|
-| `tests/*.test.mjs` | 配置归一化、状态机、文本清洗、跑偏检测、轮次门槛、回声判据、**识别错误分类与引擎回退** | —— |
+| `tests/*.test.mjs` | 配置归一化、状态机、文本清洗、跑偏检测、轮次门槛、回声判据、**识别错误分类与引擎回退**、**技能扫描/注册与互动队列单调性** | —— |
 | `smoke-bundle.mjs` | 客户端 bundle 能不能装进浏览器 | 语法错要到 boot 才炸 |
 | `smoke-host.mjs` | 四条 API 端点在 fake ctx 上通不通 | 依赖注入错要到真 ctx 才炸 |
 | `smoke-agent-route.mjs` | **常驻 agent 有没有模型** | `registry.create()` 缺 `agentOptions` 时，一切"看起来正常" |
@@ -392,6 +461,13 @@ node tools/cdp-probe.mjs "http://127.0.0.1:3080/?token=…" 12   # 真浏览器�
 | `smoke-reply-sleep.mjs` | **播报后续话 + 静默 60s 才休眠**（需求 5/8） | 终态断言挡不住"错档成 12 秒"与"计时没武装" |
 | `smoke-switch-session.mjs` | **跨会话切换 / 新建 / 回常驻 + 需求 9/10 的落地** | 假 ctx 是按假设造的，真实投影换层数会全绿而功能全废 |
 | `smoke-questions.mjs` | **提问旁听 + 语音作答（需求 12）** | 事件流主路径靠接线层转发，类单测绕过它 |
+| `smoke-delegation-http.mjs` | **真机技能挂载、派单、互动流按时间排序**（需求①④） | 单测只能证明纯逻辑对；"agent 的 setup 里真调了注册"要真机才看得见 |
+
+`smoke-delegation-http.mjs` 是**唯一能证明技能真挂上了的层**：
+它读 `/health.routing.workers[].skills.registered` —— 那个字段来自
+`setup(agentCtx)` 里 `registerExpertSkills` 的**实际返回值**，
+而不是"catalog 里扫到了"（`available`）。两者会分叉的那种故障
+（文件在、注册失败 → 专家不会那个流程）只有真机这一层抓得到。
 
 `smoke-agent-route.mjs` 是**唯一能覆盖「无模型 agent」这个坑的层**：
 它用 fake ctx + fake registry 覆盖 create / resume / live 三条创建路径，
@@ -1273,6 +1349,61 @@ agent-loop `await`，允许 async）+ 配置项 `agent.preset`（默认 `standar
 排障第一步永远是让用户**硬刷新页面**；服务端 `/api/route` 回放可以先把
 "路由器本身坏没坏"与"客户端接没接上"分开。
 
+**坑十四：派单消息必须是 DSH 的 identified message。**
+
+（V1.3 真机）`agent.followup()` 传裸对象 `{content, source}` 当时能跑，任务也确
+实完成了；但消息会被写进 `agent/inbox/spliced` 并持久化，下次启动 resume 时
+`dsh-session` 的 `assertMessageEventShape` 直接抛
+`session event at seq N lacks an identified message`。症状极具误导性：health 里
+worker 报 `session already exists`，看起来像会话重复；真正原因是**上次写入的
+历史事件非法**。修法：`lib/messages.js` 优先复用官方
+`createUserMessage()`（从 `DSH_HOME/profiles/<profile>/package.json` 建
+`createRequire` 解析，插件真实路径上没有 `@deepseek-ai/*`），拿不到时用
+`randomUUID()` 生成满足全部校验不变量的本地消息。已损坏的旧会话做备份后
+换新 session id（`-v2` 后缀）绕开，不继承不合法历史。
+
+**坑十五：worker 初始化链上的两个"永不返回"。**
+
+- `rootCtx.inject(["workspaceRegistry"], cb)` 的回调可能**永不触发**：agent 明明
+  已经建好（进度探针显示 `source: resumed` / `model: deepseek/...`），整层却
+  永远停在第一个 worker 上，health 只剩 `general` 占位，也没有任何异常。
+- 单个 worker 卡住会**连坐整层**：`ensureWorkerAgents` 是顺序循环，一个不返回，
+  后面的 researcher/operator 全都不会注册。
+
+修法三处：① 归档自愈这类**可选**防线加 3s 超时，超时只把
+`{reason:"archive-fix-timeout"}` 写进 health，不阻断注册；② 单个 worker 建立
+加 30s 超时；③ `ensureWorkerAgents` 支持 `onProgress` 逐项上报，任何时刻都能从
+health 看到卡在谁、卡在哪一步（这是从"零信息空数组"里爬出来的关键）。
+
+**坑十六：在 `sessions/` 里给会话目录改名 = 炸掉整个工作区。**
+
+排障时为"腾开"损坏的 worker 会话，把目录就地改名成
+`session-voice-worker-coder.broken-20261117`。zstd 日志里的 `header.id` 仍是旧名，
+**目录名与 header.id 错配**，DSH 的 `session-persistence-jsonl` 在
+`assertStoredIdentity` 直接抛：
+
+```
+corrupt session log "...\session-voice-worker-coder.broken-20261117\session.v4.jsonl.zstd":
+  header id "session-voice-worker-coder" and cwd identify "...\session-voice-worker-coder\..."
+```
+
+后果**不是**"跳过这一个会话"，而是 `workspace` 插件激活失败 →
+`workspaceRegistry` 服务不存在 → **侧栏所有会话消失、新建会话也建不出来**，
+看起来像数据被删光了（数据其实完好）。而且症状会伪装成别的问题：
+worker 的归档自愈 `inject` 拿不到 `workspaceRegistry`，于是报
+`archive-fix-timeout`，把我们引向"worker 初始化"这条错误线索。
+
+两条纪律：
+
+1. **坏会话要"移出 `sessions/`"，绝不在原地改名**——改名必然制造错配。
+2. 工作区会话消失/无法新建时，**先跑 `npm run check:sessions`**，
+   一秒区分"扫描器被噎住"与"数据真丢了"。
+
+工具：`tools/check-session-integrity.mjs` —— 逐目录解压第一帧，比对
+`header.id === 目录名`，不一致即退出码 1（这个判据也进 `npm run verify` 闸门）。
+已确认**不能**顺手查 cwd 一致性：组目录名是路径的有损编码，反推必然误报
+（实测会把 41 个正常会话全标红，把真问题淹掉），所以只保留能确证的那一条。
+
 ---
 
 ## 八、已知边界
@@ -1325,11 +1456,20 @@ index.js                    宿主半入口：配置归一化、配置下发、A
 lib/config.js               配置归一化 + 客户端白名单裁剪（含 turn 的夹取与语义保护）
 lib/identity.js             宿主半身份：常驻会话可见性标注 + 全局记忆注册 + **归档自愈**（含「隐藏不可行」证伪表）
 lib/agent.js                常驻 agent：模型路由解析/落盘、人格段、**preset 挂载（mountAgentPreset）**、生命周期
-lib/workers.js              worker 专家层：默认四位专家、归一化、批量建立（复用 ensurePersistentAgent；标注+归档自愈与根 agent 一致）
+lib/workers.js              worker 专家层：默认五位专家、多来源合并（workers/experts/expertDirs）、归一化、批量建立（逐项进度 + 建立/归档自愈双超时）、技能桥
+lib/skills.js               V1.4 专家技能：扫盘（内置/用户两层）、frontmatter 解析、**注册进 agent 作用域**、可用性自省
 lib/router.js               意图路由（两层第一层）：LLM 意图分类 + 任务改写；严格 JSON + 白名单 + general 兜底
+lib/messages.js             identified message 工厂：优先官方 createUserMessage，兜底随机 id（坑十四）
+lib/delegation.js           V1.3 委托中枢：派单、结果捕获、LLM 汇总、同 worker 串行/不同 worker 并行、任务超时
+lib/interactions.js         V1.4 互动中枢：旁听 session/event（审批/提问）、与汇报合流成一条按 at 排序的队列
+lib/interaction-kinds.js    互动类型常量（宿主与客户端共用；改一处不会漏另一处）
+lib/report.js               V1.3 汇报队列：严格单调游标、规则降级摘要、可朗读文案
+lib/version.js              版本号唯一来源（health 引用；单测钉住与 package.json 一致）
 lib/polish.js               转录润色（llm.stream）+ 跑偏检测 + 规则兜底
 lib/upstream.js             OpenAI 兼容 ASR/TTS 代理
-lib/routes.js               /health /config /polish /route /asr /tts
+lib/routes.js               /health /config /polish /route /delegate /reports /interactions /asr /tts
+skills/                     插件内置技能（随包发布，见 package.json 的 files）
+skills/somatic-mutation-report/SKILL.md  体细胞突变报告流程（小因·基因分析的技能）
 src/client/index.js         客户端入口：装配、快捷键、卸载
 src/client/core/machine.js  六态状态机（纯函数，可脱离浏览器测试）
 src/client/core/wakeword.js 唤醒词同音匹配 + 指令切分
@@ -1358,6 +1498,7 @@ tools/smoke-questions.mjs   提问旁听 + 语音作答真机验证（需求 12 
 tools/probe-local-ears.mjs  本地 Whisper 接线真机探针（dsh-ears 命名空间 / 后端清单 / 需要 WAV；含**时序验证**：晚 6s 重探区分"时序竞争"与"注册名错"）
 tools/probe-local-whisper.mjs 本地 Whisper **环境**探针（原生运行时 / 模型 sha256 / 音频格式闸门 / 真机推理），`--silence` 只验前两层
 tools/cdp-probe.mjs         真浏览器端到端：DOM 探测 + ask spike + 诊断（fails/prompts/hydration/turn/echo/questionBridge）
+tools/check-session-integrity.mjs 会话存储自检：逐目录比对 header.id 与目录名，不一致即退出码 1（坑十六；也叫 `npm run check:sessions`，已进 verify 闸门）
 tools/research/             只读调研脚本（探 DSH 运行时契约，如会话列表读面、origin 用法）
 tools/research/probe-question-projection.mjs  用**真机发布的折叠函数**证明 legacy 模式投影恒空（根因证据 ①）
 tools/research/probe-ask-user-logs.mjs        扫盘上会话日志，证明问题真在发生但 schema 全 legacy（根因证据 ②）
