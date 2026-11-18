@@ -53,6 +53,7 @@ import { TurnGate } from "./turn.js";
 import { EchoGuard } from "./echo.js";
 import { QuestionBridge, matchAnswer, speakQuestion } from "./questions.js";
 import { playChime, unlockAudio } from "./chime.js";
+import { createPlaybackLedger, createSeqWatermark, withinCatchup } from "./ledger.js";
 import { polish, route, delegate, reports as fetchReports, interactions as fetchInteractions, log, warn } from "./runtime.js";
 import { WebSpeechEngine, isAvailable as webSpeechAvailable } from "./engines/webspeech.js";
 import { HttpAsrEngine, isAvailable as httpAsrAvailable } from "./engines/http.js";
@@ -129,6 +130,36 @@ export class VoiceController {
 			question: null,
 		};
 
+		/**
+		 * 播报账本（需求②）：持久化"已播到哪个时间点" + "哪些内容播过了"。
+		 *
+		 * ## 为什么必须有它
+		 *
+		 * 刷新页面会把内存里的水位全部清零，而服务端队列活在宿主进程里
+		 * 不受刷新影响 —— 两条合起来就是"用户每刷新一次，就再听一遍旧汇报"。
+		 *
+		 * 账本做两件事：
+		 *   1. 记住毫秒水位（`cursor`），刷新后从它续上，不再靠 `latest` 猜；
+		 *   2. 记住已播内容的身份（`kind:key`），同一条**无论走哪条通道、
+		 *      被投递几次，一辈子只播一次**（这是兜底，比水位更硬）。
+		 *
+		 * 作用域按常驻会话 id 隔离：多个 DSH 实例共用同一个 origin 时，
+		 * 各自的账本不会互相污染。
+		 *
+		 * **必须在 `questions` / `session` 之前建好**：提问旁听桥要拿它做
+		 * "这个问题念过没有"的跨刷新判定。晚一步就是 `undefined`。
+		 */
+		this.ledger = createPlaybackLedger({ scope: this.config.agent?.sessionId ?? "default" });
+		/**
+		 * 会话 `seq` 水位（需求②的另一半）。
+		 *
+		 * 会话事件的去重靠 `seq`，而 `seq` 原先只在内存。刷新时代价是
+		 * "窗口为空 → 水位 −1 → 历史整批灌入"，只剩时间地板兜着；
+		 * 而时间地板对**没有 `time` 字段的事件**是放行的。
+		 * `seq` 是单调整数、天生跨刷新可比，比时间戳硬得多。
+		 */
+		this.seqWatermark = createSeqWatermark();
+
 		// ── 轮次门槛与回声抑制 ──────────────────────────────────────────
 		//
 		// 必须在 `engine` / `speaker` / `session` **之前**建好：它们注册的
@@ -175,6 +206,11 @@ export class VoiceController {
 		// `remote.userQuestions.answer` 的 `continued` 通道。
 		this.questions = new QuestionBridge({
 			ctx: this.ctx,
+			// 需求②：提问播报也走同一份持久账本，否则「刷新后投影重放同一个
+			// active 问题」会再念一遍（`announced` 是内存态）。共用一份账本
+			// 还有个好处：身份空间按下述前缀区分（`question:` / `report:` /
+			// 审批 id），不会互相顶掉。
+			ledger: this.ledger,
 			onQuestion: (payload) => this.handleQuestion(payload),
 			onResolved: () => this.patch({ question: null }),
 			log: (message) => log(message),
@@ -184,6 +220,8 @@ export class VoiceController {
 		this.session = new VoiceSession({
 			ctx: this.ctx,
 			config: this.config,
+			// 需求②：把会话 seq 水位也落持久化（刷新后不再靠时间戳猜历史）。
+			seqWatermark: this.seqWatermark,
 			onTurnStart: () => this.handleTurnStart(),
 			onTurnEnd: (payload) => this.handleTurnEnd(payload),
 			// 提问旁听**主路径**：原始事件流的 `tool/call`。
@@ -236,6 +274,13 @@ export class VoiceController {
 		this.reportCursor = undefined;
 		this.reportTimer = null;
 		this.lastReportText = "";
+		/**
+		 * 是否已经跟服务端对齐过水位（首帧 `latest`）。
+		 *
+		 * 只对齐一次：之后靠**持久化账本**续上（见下），而不是每次启动
+		 * 都退回到 `latest` —— 那正是"重开又播一遍"的成因之一。
+		 */
+		this.cursorSeeded = false;
 		/**
 		 * 在这台机器上**已确认不可用**的引擎名。
 		 *
@@ -1140,13 +1185,31 @@ export class VoiceController {
 	/**
 	 * 启动互动流轮询（幂等）。首次成功委托后调用（没有后台任务就无需轮询）。
 	 *
-	 * 间隔取宿主下发的 `interactions.pollMs`（默认 1.5s）；首次同步用
-	 * `"latest"` 游标，只对齐水位、不重放历史。
+	 * ## 起点：账本优先，`latest` 只是最后手段
+	 *
+	 * 早先的实现每次启动都把游标设成 `"latest"`（"只对齐水位、不重放历史"）。
+	 * 那条策略挡得住"整批历史涌入"，但有两个洞 —— 也正是真机上"前面汇报过的
+	 * 内容再打开又播一遍"的成因：
+	 *
+	 *   1. `latest` 对齐的是**服务端当前游标**，而它是 `max(Date.now(), …)`。
+	 *      刷新发生在两次播报之间时，上次已播的条目会重新落进增量窗口；
+	 *   2. 双通道：`/reports` 与 `/interactions` 是同一条汇报的两个端点，
+	 *      首帧各拉一次，谁先到谁念（`interactionsAvailable` 要到第二轮才生效）。
+	 *
+	 * 现在改为：**有账本就从账本续**（水位 + 已播集合双重去重），
+	 * 只有账本为空（首次使用、或用户清了存储）才退回 `latest` 对齐。
 	 */
 	startReportPolling() {
 		if (this.disposed || this.reportTimer !== null) return;
-		if (this.interactionCursor === undefined) this.interactionCursor = "latest";
-		if (this.reportCursor === undefined) this.reportCursor = "latest";
+		// 账本里有水位 → 从它续上（这就是"记住回答到哪个位置"）。
+		if (this.interactionCursor === undefined) {
+			const saved = this.ledger.cursor;
+			this.interactionCursor = saved > 0 ? saved : "latest";
+		}
+		if (this.reportCursor === undefined) {
+			const saved = this.ledger.cursor;
+			this.reportCursor = saved > 0 ? saved : "latest";
+		}
 		const interval = Number.isFinite(this.config.interactions?.pollMs)
 			? Math.max(500, this.config.interactions.pollMs)
 			: Number.isFinite(this.config.routing?.reportPollMs)
@@ -1156,7 +1219,7 @@ export class VoiceController {
 			this.pollReports();
 			this.pollInteractions();
 		}, interval);
-		log(`互动流轮询已启动（间隔 ${interval}ms）`);
+		log(`互动流轮询已启动（间隔 ${interval}ms，水位 ${this.ledger.cursor > 0 ? this.ledger.cursor : "首次"}）`);
 	}
 
 	/** 停止互动流轮询。 */
@@ -1183,21 +1246,42 @@ export class VoiceController {
 		try {
 			const payload = await fetchReports(this.reportCursor);
 			if (this.disposed) return;
-			if (typeof payload?.cursor === "number") this.reportCursor = payload.cursor;
+			if (typeof payload?.cursor === "number") {
+				if (this.cursorSeeded) this.ledger.advance(payload.cursor);
+				else {
+					this.ledger.seed(payload.cursor);
+					this.cursorSeeded = true;
+				}
+				this.reportCursor = payload.cursor;
+			}
 			const incoming = Array.isArray(payload?.reports) ? payload.reports : [];
 			if (incoming.length > 0) {
-				// 服务端已按完成时间升序；客户端只做去重（游标兜底）。
+				// 服务端已按完成时间升序；客户端只做去重。
+				//
+				// 去重用**同一个账本**（`kind:"report"` + jobId）：这样降级通道
+				// 与统一流共享一份"播过了"的记录 —— 即便两条通道同时活着、
+				// 同一条汇报两边都拿到，也只会念一次（需求②的硬防线）。
+				let queued = 0;
 				for (const report of incoming) {
-					this.interactionQueue.push({
+					const entry = {
 						kind: "report",
 						at: typeof report?.at === "number" ? report.at : undefined,
 						key: String(report?.jobId ?? ""),
 						label: String(report?.label ?? ""),
 						speech: String(report?.speech ?? report?.summary ?? ""),
-					});
+					};
+					if (!this.ledger.claim(entry)) continue;
+					if (!withinCatchup(entry, { now: Date.now(), windowMs: this.catchupWindowMs() })) {
+						log("跳过过期汇报（太老了不补播）");
+						continue;
+					}
+					this.interactionQueue.push(entry);
+					queued += 1;
 				}
-				this.patch({ pendingDelegations: Math.max(0, this.snapshot.pendingDelegations - incoming.length) });
-				this.drainInteractions();
+				if (queued > 0) {
+					this.patch({ pendingDelegations: Math.max(0, this.snapshot.pendingDelegations - queued) });
+					this.drainInteractions();
+				}
 			}
 		} catch (error) {
 			// 轮询失败不打扰用户（间隔短、会重试），但要留一条可见结论。
@@ -1218,7 +1302,16 @@ export class VoiceController {
 		try {
 			const payload = await fetchInteractions(this.interactionCursor);
 			if (this.disposed) return;
-			if (typeof payload?.cursor === "number") this.interactionCursor = payload.cursor;
+			if (typeof payload?.cursor === "number") {
+				// 首次（游标是 `latest`）只**对齐水位**不记账；之后每轮都推进账本，
+				// 这样"重开时从哪儿续"有一个跨刷新可用的答案。
+				if (this.cursorSeeded) this.ledger.advance(payload.cursor);
+				else {
+					this.ledger.seed(payload.cursor);
+					this.cursorSeeded = true;
+				}
+				this.interactionCursor = payload.cursor;
+			}
 			if (!this.interactionsAvailable) {
 				this.interactionsAvailable = true;
 				log("统一互动流已接入（审批 / 提问 / 汇报按时间播出）");
@@ -1226,23 +1319,43 @@ export class VoiceController {
 			const incoming = Array.isArray(payload?.interactions) ? payload.interactions : [];
 			if (incoming.length === 0) return;
 			const settings = this.config.interactions ?? {};
+			let queued = 0;
 			for (const entry of incoming) {
 				// 宿主已按类型过滤过一遍，客户端再按配置守一次：两头都判才能
 				// 保证"关掉审批播报"这件事在任一端改配置都立刻生效。
 				if (entry?.kind === "approval" && settings.announceApprovals === false) continue;
 				if (entry?.kind === "question" && settings.announceQuestions === false) continue;
+				// 需求②的硬防线：同一条内容（按 `kind:key`）一辈子只播一次。
+				// 跨刷新有效 —— 刷新后游标可能把旧条目重新纳入窗口，但账本认得它。
+				if (!this.ledger.claim(entry)) continue;
+				// 追补窗口：太老的条目记账（在上面 claim 里已记）但不真出声。
+				// 用户关页面一天再回来时，不至于被一次性念完整个队列。
+				if (!withinCatchup(entry, { now: Date.now(), windowMs: this.catchupWindowMs() })) {
+					log(`跳过过期互动（${String(entry?.kind ?? "")}，太老了不补播）`);
+					continue;
+				}
 				this.interactionQueue.push(entry);
+				queued += 1;
 				if (entry?.kind === "report") {
 					this.patch({ pendingDelegations: Math.max(0, this.snapshot.pendingDelegations - 1) });
 				}
 			}
-			this.drainInteractions();
+			if (queued > 0) this.drainInteractions();
 		} catch (error) {
 			if (this.interactionsAvailable) {
 				this.interactionsAvailable = false;
 				warn("统一互动流不可用，回退到汇报轮询", error?.message ?? error);
 			}
 		}
+	}
+
+	/**
+	 * 追补窗口长度（毫秒）。配置可覆盖；`0` = 关掉窗口限制（全部补播）。
+	 * @returns 窗口长度。
+	 */
+	catchupWindowMs() {
+		const raw = this.config.interactions?.catchupWindowMs;
+		return Number.isFinite(raw) ? Math.max(0, raw) : undefined;
 	}
 
 	/**

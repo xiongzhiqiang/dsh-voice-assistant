@@ -26,7 +26,7 @@ const FALLBACK = {
 	routing: { enabled: false, workers: [], reportPollMs: 1500 },
 	answers: { questionTimeoutMs: 60000, chime: true, repeatOnce: true },
 	// 需求④统一互动流：宿主缺失时视为关闭（没有宿主就没有审批/汇报可播）。
-	interactions: { enabled: false, announceApprovals: true, announceQuestions: true, pollMs: 1500 },
+	interactions: { enabled: false, announceApprovals: true, announceQuestions: true, pollMs: 1500, catchupWindowMs: 600000 },
 	// 全局记忆。宿主缺失时一律视为未生效 —— 它本来就只能在宿主侧注册，
 	// 这里给 `global:false` 是为了让面板有一句确定的"未开启"而不是 `undefined`。
 	memory: { global: false, active: false },

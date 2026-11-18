@@ -45,6 +45,16 @@ export class VoiceSession {
 	constructor(options) {
 		this.ctx = options.ctx;
 		this.config = options.config;
+		/**
+		 * 会话 eq 水位的持久化存储（需求②，可空）。
+		 *
+		 * 由控制器注入（`createSeqWatermark()`）—— 放在这里而不是自己 new，
+		 * 是为了让单测能把一个内存实现塞进来，也让"存储可不可用"这件事
+		 * 有一个统一的出处。
+		 */
+		this.seqWatermark = options.seqWatermark ?? null;
+		/** 绑定时采用持久化水位时的值（`null` = 用的是窗口水位，排障用）。 */
+		this.savedCursorUsed = null;
 		this.onTurnStart = options.onTurnStart ?? (() => {});
 		this.onTurnEnd = options.onTurnEnd ?? (() => {});
 		/**
@@ -431,6 +441,23 @@ export class VoiceSession {
 		// 诊断留痕：绑定时窗口里有没有东西，决定了水位线可不可信。
 		this.boundAt = Date.now();
 		this.bindEntryCount = countEvents(initialEntries);
+		// ## 需求②：持久化水位
+		//
+		// 窗口为空时 `this.cursor` 是 −1，随后历史整批灌入；那道时间地板
+		// （`floorTime`）对**没有 `time` 字段的事件**是**放行**的
+		// （`if (time !== null && time < floorTime)`，`time` 为 null 就不判）。
+		// 于是没有时间戳的历史会被当新事件处理，助手把旧回答又念一遍。
+		//
+		// `seq` 是**按会话单调的整数**，天生跨刷新可比 —— 比时间戳硬得多。
+		// 这里从持久化水位里取"上回处理到哪"，取它和窗口最大 seq 的较大值：
+		// 窗口里有内容时用它（更可信），窗口为空时靠持久化记录兜住。
+		const savedSeq = this.seqWatermark?.read(this.sessionId);
+		if (Number.isFinite(savedSeq) && savedSeq > this.cursor) {
+			this.cursor = savedSeq;
+			this.savedCursorUsed = savedSeq;
+		} else {
+			this.savedCursorUsed = null;
+		}
 		this.cursorAtBind = this.cursor;
 		/** 历史回放的时间地板（见方法注释）。 */
 		this.floorTime = this.boundAt - HISTORY_SKEW_MS;
@@ -446,16 +473,48 @@ export class VoiceSession {
 				const event = entry.event;
 				const seq = typeof event?.seq === "number" ? event.seq : null;
 				if (seq !== null && seq <= this.cursor) continue;
-				if (seq !== null) this.cursor = seq;
 				// 历史回放：推进游标（避免反复评估）但不触发回调。
 				const time = typeof event?.time === "number" ? event.time : null;
 				if (time !== null && time < this.floorTime) {
 					this.skippedHistory += 1;
+					this.advanceCursor(seq);
 					continue;
 				}
+				// ## 需求②：没有时间戳的事件不能默认放行
+				//
+				// 旧实现只判 `time !== null`，于是 `time` 缺失的事件**直接放行**
+				// （见上面那句 `time !== null && …`）。刷新时代价是水位归零、
+				// 历史整批灌入，其中的无时间戳事件会被当成新事件念出来 ——
+				// 表现就是"前面汇报过的内容再打开又播一遍"。
+				//
+				// 绑定时刻已有一批历史（`bindEntryCount > 0`）说明窗口是
+				// "带着历史"进来的：这时 `seq <= cursorAtBind` 的一律算历史。
+				// 反过来窗口为空（本机首次加载）时不能这么判 —— 那时后续
+				// 整批灌入的都是要处理的新事件。
+				if (time === null && this.bindEntryCount > 0 && seq !== null && seq <= this.cursorAtBind) {
+					this.skippedHistory += 1;
+					this.advanceCursor(seq);
+					continue;
+				}
+				this.advanceCursor(seq);
 				this.handleEvent(event);
 			}
 		});
+	}
+
+	/**
+	 * 推进事件水位（需求②：落持久化，让"处理到哪"跨刷新有效）。
+	 * @param seq - 事件序号（`null` = 该事件没有 seq，忽略）。
+	 */
+	advanceCursor(seq) {
+		if (seq === null || !Number.isFinite(seq) || seq <= this.cursor) return;
+		this.cursor = seq;
+		// 落盘失败只是丢持久化，不该影响本轮处理（`write` 内部只前进不后退）。
+		try {
+			this.seqWatermark?.write(this.sessionId, seq);
+		} catch {
+			// 存储不可用：退化成旧的"仅内存"行为，不抛。
+		}
 	}
 
 	/**

@@ -345,6 +345,37 @@ export function setController(controller) {
 						timeType: typeof entry.event?.time,
 					}));
 			},
+			/**
+			 * 播报账本（需求②）：已播到哪、记住了哪些内容、是不是真落盘了。
+			 *
+			 * ## 为什么必须暴露这条
+			 *
+			 * "刷新后不再重复播报"这件事**只有跨会话才观察得到** —— 单测里
+			 * 建两次控制器可以覆盖逻辑，但真机上"到底有没有写进 localStorage"
+			 * （隐私模式 / 配额满 / 被别的插件清了）只能靠这条看。
+			 * `persistent: false` 就是那类静默降级的直接证据。
+			 *
+			 * @returns `{ ledger, seq }`。
+			 */
+			playback: () => ({
+				ledger: controller.ledger?.snapshot?.() ?? null,
+				seq: controller.seqWatermark?.snapshot?.() ?? null,
+				interactionCursor: controller.interactionCursor ?? null,
+				reportCursor: controller.reportCursor ?? null,
+				interactionsAvailable: controller.interactionsAvailable === true,
+			}),
+			/**
+			 * 清掉播报账本（**仅测试用**）：让"首次打开"这条路径可复现。
+			 * @returns 清完之后的账本快照。
+			 */
+			resetPlayback: () => {
+				controller.ledger?.clear?.();
+				controller.seqWatermark?.clear?.();
+				controller.interactionCursor = undefined;
+				controller.reportCursor = undefined;
+				controller.cursorSeeded = false;
+				return globalThis.__xfvDebug.playback();
+			},
 			// 最近 40 条会话事件（type + 摘要），排障 turn 为何空转用。
 			// 注意事件负载在 `data` 下（见 session.js handleEvent 的说明）。
 			events: () => {

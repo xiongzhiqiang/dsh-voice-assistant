@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * V1.3/V1.4 真机 HTTP 冒烟：真实派单 → worker 后台执行 → 要点按完成时间回传。
+ * V1.3/V1.4/V1.5 真机 HTTP 冒烟：真实派单 → worker 后台执行 → 要点按完成时间回传。
  *
  * 与单测的区别：这里连的是**正在跑的 DSH**，worker 是真的常驻 agent，带
  * preset（文件/命令工具），结果汇总走真实 LLM（失败会按规则降级）。
@@ -15,7 +15,7 @@
  *   7. `/reports?after=<cursor>` 按完成时间升序回传两条不同 worker 的要点；
  *   8. `/interactions?after=<cursor>` 把**同一批汇报**也放进统一互动流，
  *      且三类条目的 `kind` 都在白名单内；
- *   9. 每条都带可朗读的 `speech`，编程那条保留路径信息；
+ *   9. 每条都带可朗读的 `speech`，且**不含**具体文件名/目录名（需求①）；
  *  10. 收尾后没有在途任务，首帧 `latest` 不重放历史。
  *
  * 用法：`node tools/smoke-delegation-http.mjs`
@@ -27,6 +27,8 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BASE = process.env.DSH_BASE ?? "http://127.0.0.1:3080";
 const API = "/plugins/dsh-voice-assistant/api";
+/** 版本号断言与收尾文案都用它，避免升版时漏改本文件。 */
+const pkg = JSON.parse(readFileSync(join(HERE, "..", "package.json"), "utf8"));
 
 const failures = [];
 const check = (name, ok, detail) => {
@@ -138,7 +140,10 @@ try {
 
 	// ── 4. 真实派单 ─────────────────────────────────────────────────────
 	// 用只读任务：本插件按设计不代答工具审批，写工作区外的路径会一直挂起。
-	// 要验证"保留路径"，让专家**报告**自己的目录即可，不产生任何文件。
+	//
+	// `coderTask` 特意让专家**报告自己的目录** —— 这正是需求① 要洗掉的
+	// 东西。于是这条派单同时验证两件事：派单链路通，且路径在播报前被
+	// `condenseArtifacts` 概括掉（下面第 9 条断言）。
 	const coderTask = "请用一句话说明你的当前工作目录是哪个路径；只回答，不要运行写文件或提权的命令。";
 	const researcherTask = "请用一句话说明语音助手里 router 与 worker 的分工，不要修改任何文件。";
 
@@ -174,10 +179,30 @@ try {
 	check("每条都有可朗读文案", collected.every((row) => typeof row.speech === "string" && row.speech.trim() !== ""), JSON.stringify(collected.map((row) => row.speech?.slice(0, 40))));
 	check("汇报文案带专家名", collected.every((row) => String(row.speech).startsWith(String(row.label))), JSON.stringify(collected.map((row) => row.speech?.slice(0, 20))));
 	const coderReport = byWorker.get("coder");
+	// 需求①：播报文案里**不允许**出现文件名 / 目录名 / 盘符。
+	//
+	// 这条原来是反过来的 ——「编程汇报保留了路径信息」，让专家报告自己的
+	// 目录来验证路径能传出来。需求① 改了口径：产物一律概括成「产生了
+	// N 个文件，都放在工作目录下」，逐字念路径正是要制止的行为。
+	//
+	// 注意断言分两层：**「工作目录」这个概括词本身是允许的**（它就是新
+	// 口径的一部分），被禁的是具体的盘符与文件名。
+	const coderSpeech = String(coderReport?.speech ?? "");
 	check(
-		"编程汇报保留了路径信息",
-		typeof coderReport?.speech === "string" && (coderReport.speech.includes("工作目录") || coderReport.speech.includes("Documents")),
-		String(coderReport?.speech).slice(0, 160),
+		"编程汇报不再念具体路径（需求①）",
+		coderSpeech !== "" && !/[A-Za-z]:[\\/]/.test(coderSpeech) && !/(?:^|[\s，、；;])[\w.\-]+\.(?:py|js|ts|json|md|csv|txt|html|yaml|yml)\b/.test(coderSpeech),
+		coderSpeech.slice(0, 160),
+	);
+	check(
+		"编程汇报也未泄漏常见用户目录名",
+		!/Users[\\/]|home[\\/]|Documents|Desktop|Downloads/.test(coderSpeech),
+		coderSpeech.slice(0, 160),
+	);
+	// 正例：概括口径（若正文里确实提到产物，应落到「工作目录」这个说法上）。
+	check(
+		"若提到产物则用「工作目录」概括口径",
+		!/(文件|结果)/.test(coderSpeech) || coderSpeech.includes("工作目录"),
+		coderSpeech.slice(0, 160),
 	);
 
 	// ── 5b. 需求④：统一互动流收下了同一条汇报 ──────────────────────────
@@ -212,7 +237,9 @@ try {
 		Array.isArray(replayInter.interactions) && replayInter.interactions.length === 0,
 		String(replayInter.interactions?.length),
 	);
-	check("health 版本号已随包更新", finalHealth?.version === "1.4.0", String(finalHealth?.version));
+	// 版本号从 package.json 读，**不硬编码** —— 否则每次升版都要改这里，
+	// 忘了改就是"代码全对但冒烟红"，而那条红没有任何诊断价值。
+	check("health 版本号与 package.json 一致", finalHealth?.version === pkg.version, `health=${finalHealth?.version} package=${pkg.version}`);
 } catch (error) {
 	failures.push({ name: "真机 HTTP 冒烟异常", detail: String(error?.stack ?? error) });
 	console.error(error);
@@ -223,5 +250,5 @@ if (failures.length > 0) {
 	for (const failure of failures) console.error(`  - ${failure.name}: ${failure.detail ?? ""}`);
 	process.exitCode = 1;
 } else {
-	console.log("\nV1.4 真机派单/汇报/互动流冒烟通过");
+	console.log(`\nV${pkg.version} 真机派单/汇报/互动流冒烟通过`);
 }

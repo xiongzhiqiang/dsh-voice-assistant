@@ -343,10 +343,12 @@ export function normalize(text) {
  */
 export class QuestionBridge {
 	/**
-	 * @param options - `{ ctx, onQuestion, onResolved, log, warn }`。
+	 * @param options - `{ ctx, onQuestion, onResolved, log, warn, ledger }`。
 	 *   `onQuestion(payload)` 让上层去播报；`payload` 形如
 	 *   `{ sessionId, callId, state, questions }`。
 	 *   `ctx` 必须有：作答要走 `ctx.remote.userQuestions.answer(...)`。
+	 *   `ledger`（可选）是控制器的播报账本 —— 用来把"已经念过哪个问题"
+	 *   **持久化**，见下面 `markAnnounced`。
 	 */
 	constructor(options = {}) {
 		this.ctx = options.ctx ?? null;
@@ -354,6 +356,24 @@ export class QuestionBridge {
 		this.onResolved = options.onResolved ?? (() => {});
 		this.log = options.log ?? (() => {});
 		this.warn = options.warn ?? (() => {});
+		/**
+		 * 播报账本（可选）。
+		 *
+		 * ## 为什么提问也要落账本（需求②的第三处漏口）
+		 *
+		 * `announced` 原来只在内存里，而 `attach()` 里的 `reconcile()`
+		 * **有意**要在绑定前先跑一遍（原注释：「页面刚刷新、问题在历史里
+		 * 也该被念出来」）。两句合起来的真机表现就是：
+		 *
+		 *   1. 助手念了一次问题；
+		 *   2. 用户刷新页面；
+		 *   3. 投影里那个问题仍是 `active`（120 秒计时窗口还没到，
+		 *      或者用户压根没答）→ `announced` 已归零 → **又念一遍**。
+		 *
+		 * 同一个坑的另外两个出口（互动流游标、会话 seq）已经在
+		 * `ledger.js` 堵上了，这里是第三处，共用同一份账本。
+		 */
+		this.ledger = options.ledger ?? null;
 
 		/** 当前绑定的会话 id（`null` = 未绑定）。 */
 		this.sessionId = null;
@@ -397,13 +417,47 @@ export class QuestionBridge {
 		}
 		this.face = face;
 		this.projectionSeen = true;
-		// `reconcile` 必须在订阅前先跑一遍：绑定前就已存在的问题
-		// （例如页面刚刷新、问题在历史里）也该被念出来。
+		// `reconcile` 必须在订阅前先跑一遍，把"当前还挂着的问题"接上。
+		//
+		// ⚠️ 需求② 修正了这里的理由。原来的注释是「页面刚刷新、问题在历史里
+		// 也该被念出来」—— 那句正是重复播报的来源，且是**有意为之**的：
+		// `announced` 刷新即归零，于是每次刷新都把同一个 `active` 问题念一遍。
+		//
+		// 现在的口径是：**接上，但只念没念过的**。判定交给
+		// `markAnnounced`（内存集合 + 持久账本），所以「真·新问题」照念，
+		// 「刷新后重放的旧问题」被账本拦下。
 		this.reconcile();
 		if (typeof face.subscribe === "function") {
 			this.unsubscribe = face.subscribe(() => this.reconcile());
 		}
 		this.log(`提问旁听已接入（session ${String(sessionId).slice(0, 8)}）`);
+		return true;
+	}
+
+	/**
+	 * 标记"这个问题已经念过"，并判断这次到底该不该念。
+	 *
+	 * 内存集合 + 持久账本**两个一起查、一起记**：
+	 *   - 内存集合管"本次页面生命周期内"（快，且不依赖存储）；
+	 *   - 持久账本管"跨刷新"（这才是需求②要的）。
+	 *
+	 * 账本认不出身份时（理论上 callId 非空就一定认得，这里是兜底）
+	 * 一律放行 —— 宁可多念一次，也不要把真问题吞掉。
+	 *
+	 * @param callId - 提问调用 id。
+	 * @returns `true` = 这次该念（并已记账）。
+	 */
+	markAnnounced(callId) {
+		const id = String(callId ?? "").trim();
+		if (id === "") return true;
+		if (this.announced.has(id)) return false;
+		// 账本判定：`claim` 判定与记账合一，返回 false 说明**上一个页面**已经念过。
+		if (this.ledger !== null && this.ledger.claim({ kind: "question", key: id }) === false) {
+			// 账本说念过 —— 补进内存集合，免得本次会话里再走一遍账本判定。
+			this.announced.add(id);
+			return false;
+		}
+		this.announced.add(id);
 		return true;
 	}
 
@@ -421,8 +475,8 @@ export class QuestionBridge {
 		const call = questionCallOf(event);
 		if (call === null) return false;
 		this.known.set(call.callId, call.questions);
-		if (this.answered.has(call.callId) || this.announced.has(call.callId)) return false;
-		this.announced.add(call.callId);
+		if (this.answered.has(call.callId)) return false;
+		if (!this.markAnnounced(call.callId)) return false;
 		// 事件流拿不到 `state`（那是投影才知道的）→ 保守按 `open`：
 		// 先播报（有价值），作答与否由 `tryAnswerQuestion` 按投影定。
 		const state = this.states.get(call.callId) ?? "open";
@@ -463,8 +517,7 @@ export class QuestionBridge {
 			const questions = Array.isArray(row.questions) && row.questions.length > 0 ? row.questions : this.known.get(callId);
 			if (!Array.isArray(questions) || questions.length === 0) continue;
 			this.known.set(callId, questions);
-			if (this.announced.has(callId)) continue;
-			this.announced.add(callId);
+			if (!this.markAnnounced(callId)) continue;
 			try {
 				this.onQuestion({ sessionId: this.sessionId, callId, state, questions });
 			} catch (error) {
@@ -472,6 +525,8 @@ export class QuestionBridge {
 			}
 		}
 		// 已经不在 active 里的（被答掉/被撤销）：清掉记录，避免集合无限长。
+		// 注意**只清内存集合**，不动持久账本 —— 账本要留着跨刷新拦截
+		// "问题还挂在 active 上没答"这一种重放（上面 markAnnounced 的场景）。
 		const live = new Set(active.map((row) => (typeof row?.callId === "string" ? row.callId : "")));
 		for (const callId of this.announced) {
 			if (!live.has(callId) && this.answered.has(callId)) this.announced.delete(callId);

@@ -52,7 +52,73 @@ V1.4 加上**专家技能**与**统一互动流**：
 - 路由失败/超时/关闭 → 一律落 `general` + 原文，用户无感、指令不丢；
 - 配置：`cordis.patch.yml` 的 `routing:` 段（`enabled` / `timeoutMs` / `jobTimeoutMs` /
   `reportPollMs` / `workers` / `experts` / `expertDirs`）与 `interactions:` 段
-  （`enabled` / `announceApprovals` / `announceQuestions` / `pollMs` / `limit`）。
+  （`enabled` / `announceApprovals` / `announceQuestions` / `pollMs` / `limit` /
+  `catchupWindowMs`）。
+
+### V1.5 的三处口径修正
+
+V1.4 之后按真机反馈收紧了三件事，都不是新功能，而是**把既有行为调到用户真正想要的形状**：
+
+**① 汇报不念路径。** 原来 worker 的原话里带盘符就照念（"已保存到
+`D:\work\out\hello.py`"），用户要求改成概括口径：**「产生了几个文件，都放在
+工作目录下」**。落点在 `lib/report.js` 的 `condenseArtifacts(text)`：按后缀数出
+文件数 → 剥掉含路径的**整条子句** → 补一句概括。四道闸都过这道口径（LLM 汇总
+提示词、`deterministicSummary` 规则兜底、LLM 输出后处理、`formatReportSpeech`
+最后一道），所以模型不听话也不会念盘符。
+
+两个非显然的取舍：
+
+- **整条子句丢、而不是把路径抠掉**：抠掉会留断尾（"程序写好并保存到"），
+  念出来像话没说完；而路径所在子句的内容通常就是"东西放哪了"，已被概括句
+  完整覆盖。代价是挂在同一子句里的动词一起丢 —— 这是刻意接受的。
+- **失败原因只洗路径、不剥子句**：「写 `D:\out\a.py` 被拒」里的原因才是用户
+  要的，剥掉就只剩一句"产生了 1 个文件"，故障信息全丢。
+
+**② 记住播报到哪个位置（修「重开又念一遍」）。** 根因是**所有水位都只在内存**，
+刷新即归零；而服务端队列活在宿主进程里、不受刷新影响 —— 两条合起来就是"用户
+每刷新一次，就再听一遍旧的"。三处漏口都堵上了，共用一份 `localStorage` 账本
+（`src/client/core/ledger.js`）：
+
+| 漏口 | 原状 | 现在 |
+|---|---|---|
+| 互动流游标 | 内存 → 首帧 `latest` | 持久化游标 + 已播 key 集合（`kind:key`，一辈子只播一次） |
+| 会话 `seq` 水位 | 内存 → 历史整批灌入，只剩 `floorTime` 兜 | `seq` 落盘，且**无时间戳事件不再默认放行** |
+| 提问 `announced` | 内存 → 投影重放就重念 | 走同一份账本 |
+
+配套两点：
+
+- **追补窗口**（`catchupWindowMs`，默认 10 分钟）：光有游标会带来反问题 ——
+  用户关页面一天回来，200 条队列会被一次念完，比重复播报更糟。窗口外的
+  **只记账不播**（游标照常推进）。
+- **存储必须容错**：`localStorage` 在隐私模式/配额满/非浏览器环境都可能抛，
+  任何一次读写异常都退化成内存实现 —— 功能降级到"本次会话内有效"，绝不影响出声。
+
+真机验证走 `tools/cdp-ledger-probe.mjs`（真 Chrome，灌水位 → `Page.reload` →
+读回）。**必须真浏览器**：单测用的是假存储，而"写进 `localStorage` 又读得回来"
+正是本需求的全部价值。探针刻意避开与轮询的竞态 —— 已播 key 只增不减；水位灌
+一个略微超前的值（`advance` 只前进不后退，轮询覆盖不掉）。
+
+**③ 不闲聊临床/生医/科研，被问起直说职责。** 两层落点，缺一层就破：
+
+- **persona**（`lib/agent.js` 的 `DEFAULT_PERSONA`）管"已经落到 general 的话
+  该怎么说"；
+- **路由清单里 `general` 的描述**管"压根别把这类话落到 general" —— 它同时喂给
+  路由模型（`router.js` 的 `roster`），原来只写"日常对话、问答、闲聊"，于是
+  "帮我看看这个突变有没有临床意义"被判成"问答"送给小凤，它就只能自己硬聊。
+
+措辞的边界是关键：落在「**聊天对象** vs **执行**」这条线上，**不是**「相关 /
+不相关」。这类请求恰恰是这个助手最该接的活，写成"拒绝回答"会把核心功能砍掉。
+所以 persona 明确写了"不要因为话题敏感就拒绝或敷衍"。
+
+⚠️ 还有一个反直觉的坑：**不能**让小凤"把任务派给对应专家"。它**没有派单这个
+能力** —— 派单发生在客户端，在它收到消息**之前**（它收到这类消息，本来就说明
+路由超时或失败了）。让它"去派"，它既无工具可调又必须给个交代，结果不是编个
+"已转给专家"的假承诺，就是自己上手聊。改成它能兑现的动作：说明职责 + 请用户
+把需求讲具体。
+
+同一件事还有一处加固：路由超时默认从 6s 提到 **10s**。真机实测冷启动首调约
+6.0s，正好压在 6s 边界上 —— 首次说话偶发降级，而降级的后果在需求③ 之后被
+放大了（指令落到不聊临床的小凤身上）。
 
 ### 自己加一位专家（需求①的入口）
 
@@ -372,6 +438,21 @@ dsh plugin --profile web add "$PWD"
       enabled: true
       sessionId: 'session-voice-assistant-root'
       steer: true                # 允许思考中插话纠偏（还要 turn.steerWhileThinking 也为真）
+      # persona 留空用内置默认（含职责边界段：不闲聊临床/生医/科研，被问起直说职责）
+    routing:                     # 两层架构第一层：小凤做 router，把指令派给专家
+      enabled: true
+      timeoutMs: 10000           # 路由 LLM 超时。**冷启动首调约 6s**，别调到 6s 附近
+      jobTimeoutMs: 300000       # 单个委托最长等待（等待人工审批的任务按失败汇报）
+      reportPollMs: 1500         # /reports 轮询间隔
+      workers: []                # 内联专家清单（空 = 用内置 5 位）
+      expertDirs: []             # 专家目录：每个 *.json 一位，丢文件即生效
+    interactions:                # 统一互动流（审批 / 提问 / 汇报按时间播报）
+      enabled: true
+      announceApprovals: true    # 只播报提醒，**不语音代答**（误听的代价是真实损害）
+      announceQuestions: true
+      pollMs: 1500
+      limit: 200
+      catchupWindowMs: 600000    # 追补窗口：比这更老的只记账不播（防止攒一天回来一次念完）
     turn:
       silenceMs: 10000           # 声音停止多久 = 这一轮说完了（下界 3s / 上界 10min）
       maxTurnMs: 300000          # 单轮硬上限：连续说话时的安全阀（自动抬到 ≥ silenceMs+5s）
@@ -1455,15 +1536,15 @@ worker 的归档自愈 `inject` 拿不到 `workspaceRegistry`，于是报
 index.js                    宿主半入口：配置归一化、配置下发、API 路由、常驻 agent、标注、全局记忆、归档自愈接线
 lib/config.js               配置归一化 + 客户端白名单裁剪（含 turn 的夹取与语义保护）
 lib/identity.js             宿主半身份：常驻会话可见性标注 + 全局记忆注册 + **归档自愈**（含「隐藏不可行」证伪表）
-lib/agent.js                常驻 agent：模型路由解析/落盘、人格段、**preset 挂载（mountAgentPreset）**、生命周期
+lib/agent.js                常驻 agent：模型路由解析/落盘、**人格段（V1.5 含职责边界）**、**preset 挂载（mountAgentPreset）**、生命周期
 lib/workers.js              worker 专家层：默认五位专家、多来源合并（workers/experts/expertDirs）、归一化、批量建立（逐项进度 + 建立/归档自愈双超时）、技能桥
 lib/skills.js               V1.4 专家技能：扫盘（内置/用户两层）、frontmatter 解析、**注册进 agent 作用域**、可用性自省
-lib/router.js               意图路由（两层第一层）：LLM 意图分类 + 任务改写；严格 JSON + 白名单 + general 兜底
+lib/router.js               意图路由（两层第一层）：LLM 意图分类 + 任务改写；严格 JSON + 白名单 + general 兜底；V1.5 加「临床/生医/科研有实质内容必须派专家」规则
 lib/messages.js             identified message 工厂：优先官方 createUserMessage，兜底随机 id（坑十四）
 lib/delegation.js           V1.3 委托中枢：派单、结果捕获、LLM 汇总、同 worker 串行/不同 worker 并行、任务超时
 lib/interactions.js         V1.4 互动中枢：旁听 session/event（审批/提问）、与汇报合流成一条按 at 排序的队列
 lib/interaction-kinds.js    互动类型常量（宿主与客户端共用；改一处不会漏另一处）
-lib/report.js               V1.3 汇报队列：严格单调游标、规则降级摘要、可朗读文案
+lib/report.js               V1.3 汇报队列：严格单调游标、规则降级摘要、可朗读文案；V1.5 加 **`condenseArtifacts`（路径→「N 个文件，都在工作目录下」）**
 lib/version.js              版本号唯一来源（health 引用；单测钉住与 package.json 一致）
 lib/polish.js               转录润色（llm.stream）+ 跑偏检测 + 规则兜底
 lib/upstream.js             OpenAI 兼容 ASR/TTS 代理
@@ -1477,7 +1558,8 @@ src/client/core/controller.js 编排：状态副作用、计时、润色、播�
 src/client/core/turn.js     轮次门槛：片段攒成整轮（静音/硬上限/手动三条提交路径）
 src/client/core/echo.js     回声抑制：归一化 + 双向包含，防"自说自话"
 src/client/core/session.js  DSH 会话桥（retain / prompt / 事件订阅 / 历史水合防线 / 跨会话切换 / 转发 tool/call）
-src/client/core/questions.js 提问旁听 + 语音作答（事件流主路径 + 投影补充；只做模型提问，不碰工具审批）
+src/client/core/questions.js 提问旁听 + 语音作答（事件流主路径 + 投影补充；只做模型提问，不碰工具审批；V1.5 起「念过没有」落持久账本）
+src/client/core/ledger.js   V1.5 播报账本：持久化游标 + 已播 key 集合 + 追补窗口 + 容错存储（修「重开又念一遍」）
 src/client/core/text.js     播报前清洗、分句、事件取文本（兼容 data 包裹）
 src/client/core/audio/wav.js 浏览器录音 → 16k 单声道 PCM16 WAV（本地 Whisper 等后端的硬要求；含宿主侧判定的忠实复刻）
 src/client/core/engines/    webspeech.js | http.js | ears.js（ears 内含命名空间多路取法 + 按后端决定是否转码）
@@ -1494,6 +1576,7 @@ tools/smoke-agent-route.mjs 常驻 agent 模型路由回归（钉死最隐蔽的
 tools/smoke-turn-gate.mjs   轮次门槛 + 回声抑制真机验证（需求 6/7 的唯一覆盖层）
 tools/smoke-reply-sleep.mjs 播报后续话 + 静默 60s 才休眠真机验证（需求 5/8 的唯一覆盖层）
 tools/smoke-switch-session.mjs 跨会话切换/新建/回常驻 + 需求 9/10 落地真机验证
+tools/cdp-ledger-probe.mjs   V1.5 真浏览器验证需求②：灌水位 → Page.reload → 读回（单测用假存储，这一步只有真浏览器能证）
 tools/smoke-questions.mjs   提问旁听 + 语音作答真机验证（需求 12 的唯一覆盖层）
 tools/probe-local-ears.mjs  本地 Whisper 接线真机探针（dsh-ears 命名空间 / 后端清单 / 需要 WAV；含**时序验证**：晚 6s 重探区分"时序竞争"与"注册名错"）
 tools/probe-local-whisper.mjs 本地 Whisper **环境**探针（原生运行时 / 模型 sha256 / 音频格式闸门 / 真机推理），`--silence` 只验前两层

@@ -3,6 +3,7 @@ import { STATES, EVENTS } from "../src/client/core/constants.js";
 import { nextState, VoiceMachine } from "../src/client/core/machine.js";
 import { findWake, normalizeWithMap } from "../src/client/core/wakeword.js";
 import { assistantTextOf, splitForSpeech, stripForSpeech, textFromContent } from "../src/client/core/text.js";
+import { QuestionBridge } from "../src/client/core/questions.js";
 
 const failures = [];
 const check = (name, actual, expected) => {
@@ -1511,6 +1512,149 @@ await (async () => {
 		check("排障：未命中路径可判（不会把 undefined 当命中）", probe.paths.find((p) => p.from === "ctx.get(dshEars)")?.hit, false);
 	}
 })();
+
+// ── 需求②：播报账本（让助手记住已播到哪，刷新不重播）──────────────────
+//
+// 真机症状：助手前面汇报过的内容，再次打开页面时又播报一遍。
+// 根因是所有水位只在内存里，刷新即归零，而服务端队列活在宿主进程里
+// **不受刷新影响** —— 两条合起来就是"每刷新一次就再听一遍旧的"。
+{
+	const { createPlaybackLedger, createSeqWatermark, createSafeStorage, entryIdentity, withinCatchup, memoryStorage, resolveStorage, hashText } = await import("../src/client/core/ledger.js");
+
+	/** 造一个可观察的假存储。 */
+	const makeStore = () => {
+		const map = new Map();
+		return {
+			map,
+			getItem: (key) => (map.has(key) ? map.get(key) : null),
+			setItem: (key, value) => {
+				map.set(key, String(value));
+			},
+			removeItem: (key) => map.delete(key),
+		};
+	};
+
+	// ① 身份：优先用服务端 id，没有就用文本哈希。
+	check("身份用 kind:key", entryIdentity({ kind: "report", key: "job-1" }), "report:job-1");
+	check("身份退化到 jobId", entryIdentity({ kind: "report", jobId: "job-2" }), "report:job-2");
+	check("身份退化到 callId", entryIdentity({ kind: "question", callId: "call-9" }), "question:call-9");
+	check("没有 id 时用文本哈希（同文本同身份）", entryIdentity({ kind: "report", speech: "完成了" }), entryIdentity({ kind: "report", speech: "完成了" }));
+	check("不同文本身份不同", entryIdentity({ kind: "report", speech: "甲" }) === entryIdentity({ kind: "report", speech: "乙" }), false);
+	check("既无 key 又无文本时没有身份", entryIdentity({ kind: "report" }), "");
+	check("哈希稳定且 8 位", hashText("x").length, 8);
+
+	// ② 存储兜底：拿不到 localStorage 也不能崩（退化成内存实现）。
+	check("无 localStorage 时降级为内存存储", resolveStorage(undefined).persistent, false);
+	check("有 localStorage 时算持久化", resolveStorage(makeStore()).persistent, true);
+	const broken = { getItem() { throw new Error("x"); }, setItem() { throw new Error("x"); } };
+	check("读抛异常时返回兜底值而不是崩", createSafeStorage(broken).read("k", { a: 1 }), { a: 1 });
+	check("写抛异常（配额满）时如实返回 false", createSafeStorage(broken).write("k", { a: 1 }), false);
+
+	// ③ 核心：同一份存储上"重建一次账本"= 用户刷新页面。
+	const storage = makeStore();
+	const first = createPlaybackLedger({ scope: "s1", storage });
+	check("首次没有水位", first.cursor, 0);
+	check("首次 claim 通过", first.claim({ kind: "report", key: "job-1", at: 1000 }), true);
+	check("同一条再 claim 被拦（同一次会话内不重播）", first.claim({ kind: "report", key: "job-1", at: 1000 }), false);
+	first.advance(5000);
+	check("水位已推进", first.cursor, 5000);
+
+	// —— 关键断言：刷新（换新实例、同一份存储）后仍然记得 ——
+	const second = createPlaybackLedger({ scope: "s1", storage });
+	check("刷新后水位续上（不再退回 latest）", second.cursor, 5000);
+	check("刷新后同一条仍被拦（这就是需求②要的效果）", second.claim({ kind: "report", key: "job-1", at: 1000 }), false);
+	check("刷新后新的一条照常播", second.claim({ kind: "report", key: "job-2", at: 6000 }), true);
+
+	// ④ 作用域隔离：不同助手实例（不同 DSH_HOME）的账本不能互相污染。
+	const other = createPlaybackLedger({ scope: "s2", storage });
+	check("另一个作用域不受影响", other.cursor, 0);
+	check("另一个作用域里同 key 能播", other.claim({ kind: "report", key: "job-1", at: 1000 }), true);
+
+	// ⑤ 游标只前进：服务端重启后游标归零，倒退会把旧条目重新纳入窗口。
+	// 注意 `claim` 只记账、不动时间水位（职责分离：判定去重 ≠ 推进游标）。
+	check("记账不推进时间水位", second.cursor, 5000);
+	check("游标不接受倒退", second.advance(100), false);
+	check("游标仍停在原值", second.cursor, 5000);
+	check("游标接受前进", second.advance(6000), true);
+	check("游标停在最大值", second.cursor, 6000);
+
+	// ⑥ 坏数据与未来游标：宁可重置，也不要让助手彻底哑掉。
+	const dirty = makeStore();
+	dirty.setItem("xfv:v1:played:s1", "{ 不是 JSON");
+	check("坏 JSON 当作没有记录（不崩）", createPlaybackLedger({ scope: "s1", storage: dirty }).cursor, 0);
+	const future = makeStore();
+	future.setItem("xfv:v1:played:s1", JSON.stringify({ cursor: Date.now() + 86400000, keys: [] }));
+	check("未来游标被重置（否则永远没有新条目可播）", createPlaybackLedger({ scope: "s1", storage: future }).cursor, 0);
+
+	// ⑦ 记账有界：超限从最老的丢，内存与集合都要跟着缩。
+	const tiny = createPlaybackLedger({ scope: "s3", storage: makeStore(), limit: 3 });
+	for (let index = 1; index <= 5; index += 1) tiny.claim({ kind: "report", key: `k${index}` });
+	check("账本按上限截断", tiny.size, 3);
+	check("被挤掉的旧 key 可再播（集合同步缩了）", tiny.claim({ kind: "report", key: "k1" }), true);
+
+	// ⑧ 追补窗口：关页面一天回来，不该把整个队列念完。
+	const now = Date.now();
+	check("窗口内的条目照常播", withinCatchup({ at: now - 60000 }, { now }), true);
+	check("太老的条目不播（只记账）", withinCatchup({ at: now - 3600000 }, { now }), false);
+	check("窗口设为 0 = 关掉限制（全部补播）", withinCatchup({ at: now - 86400000 }, { now, windowMs: 0 }), true);
+	check("没有时间戳的条目不敢拦（宁可多播）", withinCatchup({}, { now }), true);
+
+	// ⑨ 会话 seq 水位：顺序刷新后不应重放旧 seq。
+	const seqStore = makeStore();
+	const seq1 = createSeqWatermark({ storage: seqStore });
+	check("首次没有 seq 记录", seq1.read("sess-a"), null);
+	check("写入 seq", seq1.write("sess-a", 120), true);
+	check("只前进不后退", seq1.write("sess-a", 100), false);
+	check("读回最新", seq1.read("sess-a"), 120);
+	const seq2 = createSeqWatermark({ storage: seqStore });
+	check("刷新后 seq 水位仍在（历史不会再被当新事件）", seq2.read("sess-a"), 120);
+	check("会话之间互不干扰", seq2.read("sess-b"), null);
+	check("可以清掉某个会话的记录", seq2.drop("sess-a"), true);
+	check("清掉后读回 null", seq2.read("sess-a"), null);
+
+	// ⑩ 脱壳冒烟：内存存储与真存储行为一致（上层不需要写两条分支）。
+	const m = memoryStorage();
+	m.setItem("a", 1);
+	check("内存存储读回字符串", m.getItem("a"), "1");
+	m.removeItem("a");
+	check("内存存储删掉后为空", m.getItem("a"), null);
+
+	// ⑪ 提问播报也必须落账本 —— 需求②的第三处漏口。
+	//
+	// `QuestionBridge.announced` 是内存态，而 `attach()` 里的 `reconcile()`
+	// **有意**要在订阅前先跑一遍。两句合起来：用户刷新页面时，只要那个问题
+	// 还挂在投影 `active` 上（120s 计时窗口未到 / 用户没答），就会再念一遍。
+	const qStore = makeStore();
+	const qLedger1 = createPlaybackLedger({ scope: "q", storage: qStore });
+	const announcements1 = [];
+	const bridge1 = new QuestionBridge({
+		ledger: qLedger1,
+		onQuestion: (payload) => announcements1.push(payload.callId),
+	});
+	check("第一次念问题", bridge1.markAnnounced("call_1"), true);
+	check("同一次会话内不重念", bridge1.markAnnounced("call_1"), false);
+	check("确实播报了一次", announcements1.length, 0); // markAnnounced 只判定，不自己播
+
+	// 模拟"刷新页面"：新桥 + 同一份存储。
+	const qLedger2 = createPlaybackLedger({ scope: "q", storage: qStore });
+	const bridge2 = new QuestionBridge({
+		ledger: qLedger2,
+		onQuestion: () => {},
+	});
+	check("刷新后同一个问题不再念（这就是需求②要的）", bridge2.markAnnounced("call_1"), false);
+	check("刷新后新问题照常念", bridge2.markAnnounced("call_2"), true);
+
+	// 提问与汇报共用一份账本时，身份空间不能互相顶掉。
+	const shared = createPlaybackLedger({ scope: "shared", storage: makeStore() });
+	const sharedBridge = new QuestionBridge({ ledger: shared, onQuestion: () => {} });
+	check("汇报记过账不妨碍提问", shared.claim({ kind: "report", key: "call_1" }), true);
+	check("同 key 不同 kind 各自独立", sharedBridge.markAnnounced("call_1"), true);
+
+	// 没有账本（老宿主 / 降级）时退回纯内存行为，功能只是"不跨刷新"。
+	const bare = new QuestionBridge({ onQuestion: () => {} });
+	check("无账本时同一实例内仍去重", [bare.markAnnounced("c"), bare.markAnnounced("c")], [true, false]);
+	check("无 callId 时一律放行（宁可多念不可漏念）", bare.markAnnounced(""), true);
+}
 
 if (failures.length > 0) {
 	console.error(`\n${failures.length} 项失败`);

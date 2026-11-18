@@ -5,7 +5,7 @@ import { ensureSessionNotArchived } from "../lib/identity.js";
 import { normalizeWorkers, workerTargets, DEFAULT_WORKERS } from "../lib/workers.js";
 import { parseRouteOutput } from "../lib/router.js";
 import { mountAgentPreset, composeAgentScope } from "../lib/agent.js";
-import { createReportQueue, deterministicSummary, formatReportSpeech, parseReportAfter } from "../lib/report.js";
+import { createReportQueue, deterministicSummary, formatReportSpeech, parseReportAfter, condenseArtifacts, countArtifacts, hasPaths, redactPaths } from "../lib/report.js";
 import { createDelegationHub } from "../lib/delegation.js";
 
 const failures = [];
@@ -344,6 +344,12 @@ check("客户端 worker 无 persona", clientRouting.workers.every((w) => !("pers
 check("客户端拿到各专家的技能名", clientRouting.workers.find((w) => w.id === "bioinfo").skills, ["somatic-mutation-report"]);
 check("客户端配置不含技能正文", JSON.stringify(clientRouting).includes("AMP/ASCO/CAP"), false);
 check("委托超时默认 5 分钟", routingDefault.routing.jobTimeoutMs, 300000);
+// 需求③连带：路由降级会把临床/生医/科研指令落到小凤身上（它按设计不聊这类
+// 话题），用户听到的是一句职责说明而不是真执行。冷启动首调实测约 6.0s，
+// 所以默认超时必须**明显高于**它，留出余量。
+check("路由超时默认 10 秒（留出冷启动余量）", routingDefault.routing.timeoutMs, 10000);
+check("路由超时受上限夹取", normalizeConfig({ routing: { timeoutMs: 999999 } }).routing.timeoutMs, 15000);
+check("路由超时受下限夹取", normalizeConfig({ routing: { timeoutMs: 1 } }).routing.timeoutMs, 2000);
 check("委托超时下界夹取", normalizeConfig({ routing: { jobTimeoutMs: 100 } }).routing.jobTimeoutMs, 30000);
 check("委托超时的上报间隔可配", normalizeConfig({ routing: { reportPollMs: 200 } }).routing.reportPollMs, 500);
 
@@ -357,6 +363,41 @@ check("task 空串回退原文", parseRouteOutput('{"worker":"coder","task":""}'
 check("非 JSON 返回 null", parseRouteOutput("我认为应该交给编程专家处理。", known, "原文"), null);
 check("空输出返回 null", parseRouteOutput("", known, "原文"), null);
 check("null 输出返回 null", parseRouteOutput(null, known, "原文"), null);
+
+// ── 需求③：不闲聊临床/生医/科研，被问起直说职责 ────────────────────────
+//
+// 这条需求有**两层**落点，缺一层就会破：persona 管"已经落到 general 的话
+// 该怎么说"，路由清单管"压根别把这类话落到 general"。只改 persona 而
+// 路由把临床问题判成"问答"送给小凤，它就只能自己硬聊 —— 正是要制止的行为。
+{
+	const { DEFAULT_PERSONA } = await import("../lib/agent.js");
+	const general = DEFAULT_WORKERS.find((w) => w.id === "general");
+
+	// ① persona 里有职责边界段。
+	check("persona 含职责边界段", /职责边界/.test(DEFAULT_PERSONA), true);
+	// 抓"不当聊天对象"这层意思 —— 被问起要直说职责，而不是拒绝执行。
+	check("persona 点明不做这类话题的聊天对象", /临床、生物医学或科研话题的聊天对象/.test(DEFAULT_PERSONA), true);
+	check("persona 要求直说职责", /直接说明你的职责/.test(DEFAULT_PERSONA), true);
+	// 反面断言：绝不能让模型理解成"拒绝此类请求"。这类请求恰恰是本助手
+	// 最该接的活（派给专家），写成拒绝就把核心功能砍了。
+	check("persona 明确不要因为敏感就拒绝", /不要因为话题敏感就拒绝或敷衍/.test(DEFAULT_PERSONA), true);
+	// 反向断言：**不能**让小凤去"派单"。它没有那个工具（派单发生在客户端，
+	// 在它收到消息之前），写进去只会诱发假承诺或自己上手聊。
+	check("persona 不让小凤去派单（它没有这个工具）", /把任务派给/.test(DEFAULT_PERSONA), false);
+	check("persona 改为可兑现的动作（请用户说明具体需求）", /请他说明具体要做什么/.test(DEFAULT_PERSONA), true);
+	check("persona 仍保留输出形态约束", /输出形态约束/.test(DEFAULT_PERSONA), true);
+
+	// ② 路由清单里的 general 描述也必须体现这层边界。
+	check("general 描述写明临床/生医/科研不属聊天范围", /不属于聊天范围/.test(general.description), true);
+	check("general 描述引导有实质需求的归给专家", /归给对应专家/.test(general.description), true);
+	// general 描述会喂给路由模型，别把"闲聊"这个诱因留在里面。
+	check("general 描述不再把闲聊当卖点", /闲聊/.test(general.description), false);
+
+	// ③ 需求① 的播报口径同步落到专家 persona（原来写的是"念文件路径"）。
+	const bioinfo = DEFAULT_WORKERS.find((w) => w.id === "bioinfo");
+	check("专家 persona 不再要求念文件路径", /念结论与文件路径/.test(bioinfo.persona), false);
+	check("专家 persona 改成概括口径", /产生了几个文件，都放在工作目录下/.test(bioinfo.persona), true);
+}
 
 // ── preset 挂载（坑十三：不带 preset 的 agent 没有文件/命令工具）──────
 check("默认 preset 是 standard", empty.agent.preset, "standard");
@@ -409,9 +450,64 @@ check(
 	check("latest 参数原样解析", parseReportAfter("/plugins/dsh-voice-assistant/api/reports?after=latest"), "latest");
 	check("数字参数原样解析", parseReportAfter("/api/reports?after=1234"), "1234");
 
-	check("规则摘要保留路径", deterministicSummary({ result: "文件在 D:\\a.py", ok: true }), "文件在 D:\\a.py。");
 	check("规则摘要说清失败原因", deterministicSummary({ ok: false, reason: "模型没配置" }), "任务失败，原因是模型没配置。");
-	check("播报文案带专家名", formatReportSpeech({ label: "阿码", summary: "文件在 D:\\a.py。", ok: true }), "阿码回报：文件在 D:\\a.py。");
+	check(
+		"失败原因只洗路径、不概括成文件数（原因才是用户要的）",
+		deterministicSummary({ ok: false, reason: "写 D:\\out\\a.py 被拒" }),
+		"任务失败，原因是写 工作目录 被拒。",
+	);
+
+	// ── 需求①：汇报不逐字念文件名与目录名 ────────────────────────────
+	//
+	// 真机症状：专家一次产出三四个文件时，播报变成一长串
+	// `D:\...\a.py、D:\...\b.py…`，语音场景下用户既记不住也听不出重点。
+	// 新口径是「产生了 N 个文件，都放在工作目录下」。
+	check("数出提及的文件数（去重）", countArtifacts("保存到 D:\\a.py、D:\\b.py 和 D:\\c.py。"), 3);
+	check("同一文件提到两次只算一个", countArtifacts("改了 lib/report.js，lib/report.js 又有注释。"), 1);
+	check("无后缀的目录名不计数（那是目录不是文件）", countArtifacts("已保存到 D:\\work\\out 目录"), 0);
+	check("裸文件名也算产物（worker 常不写目录）", hasPaths("已生成 report.csv。"), true);
+	check("普通中文句不含路径", hasPaths("没有产生文件，只是回答了一个问题。"), false);
+	check("路径被替换成中性说法（不留断尾）", redactPaths("已保存到 D:\\work\\out\\hello.py。"), "已保存到 工作目录。");
+	check(
+		"括号里只有路径时整对括号一起删（不留念不出的空括号）",
+		redactPaths("结果（D:\\out\\a.py）已就绪"),
+		"结果已就绪",
+	);
+	check(
+		"概括成「产生了 N 个文件，都放在工作目录下」",
+		condenseArtifacts("报告已生成：/home/user/report/a.html，另外生成了 /home/user/report/b.csv。"),
+		"报告已生成。产生了 2 个文件，都放在工作目录下。",
+	);
+	check(
+		"结论里的冒号句式保留（不剥掉前半句）",
+		condenseArtifacts("任务完成：把 src/client/core/controller.js 与 lib/report.js 都改了。"),
+		"任务完成。产生了 2 个文件，都放在工作目录下。",
+	);
+	check("结论自己说了数量就不重复播报", condenseArtifacts("已保存到 D:\\a.py、D:\\b.py 和 D:\\c.py，共三个文件。"), "共三个文件。都放在工作目录下。");
+	check("只写了目录名时退化为「结果都放在工作目录下」", condenseArtifacts("我当前的工作目录是 D:\\Users\\xqz19\\WorkBuddy\\DSH_dev。"), "结果都放在工作目录下。");
+	check("没有产物痕迹时原样返回（不硬塞文件数）", condenseArtifacts("没有产生文件，只是回答了一个问题。"), "没有产生文件，只是回答了一个问题。");
+	check("盘符不会被当成子句分隔符切开", condenseArtifacts("已完成。程序写好并保存到 D:\\work\\out\\hello.py。"), "已完成。产生了 1 个文件，都放在工作目录下。");
+// 碎片修正：冒号句式会把引导词（"工作目录"）留在**前一条**子句里，路径被
+// 丢掉后它就变成一个没有信息量的名词。念成「小因回报：工作目录。」比不播还差。
+check("路径叙述碎片不残留（不留光秃秃的「工作目录」）", condenseArtifacts("工作目录：D:\\work\\out，已生成 report.csv。"), "产生了 1 个文件，都放在工作目录下。");
+check("碎片判定逐条生效（多子句场景也拦得住）", condenseArtifacts("已生成报告。工作目录：D:\\work\\out。"), "已生成报告。结果都放在工作目录下。");
+check("碎片判定不误伤真结论", condenseArtifacts("已生成报告，保存在输出目录。"), "已生成报告，保存在输出目录。");
+
+	check(
+		"规则摘要也不念路径（LLM 失败时的兜底同样受限）",
+		deterministicSummary({ result: "已完成。程序写好并保存到 D:\\work\\out\\hello.py。", ok: true }),
+		"已完成。产生了 1 个文件，都放在工作目录下。",
+	);
+	check(
+		"播报文案是最后一道闸（模型不听话也不念盘符）",
+		formatReportSpeech({ label: "阿码", summary: "文件在 D:\\a.py。", ok: true }),
+		"阿码回报：产生了 1 个文件，都放在工作目录下。",
+	);
+	check(
+		"播报文案概括多文件",
+		formatReportSpeech({ label: "阿码", summary: "写好了 D:\\a.py、D:\\b.py", ok: true }),
+		"阿码回报：产生了 2 个文件，都放在工作目录下。",
+	);
 	check("失败文案不重复任务失败四字", formatReportSpeech({ label: "阿码", ok: false, reason: "工具不可用" }), "阿码：任务失败，原因是工具不可用。");
 
 	/** 造一个最小事件总线（只要 on/emit/get/logger）。 */
