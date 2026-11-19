@@ -56,9 +56,11 @@ import { playChime, unlockAudio } from "./chime.js";
 import { createPlaybackLedger, createSeqWatermark, withinCatchup } from "./ledger.js";
 import {
 	polish, route, delegate, reports as fetchReports, interactions as fetchInteractions,
-	listExperts, addExpert, removeExpert, log, warn,
+	listExperts, addExpert, removeExpert,
+	listSessions, createSession, switchSession, closeSession,
+	log, warn,
 } from "./runtime.js";
-import { parseExpertCommand, formatCommandSpeech } from "./expert-commands.js";
+import { parseExpertCommand, formatCommandSpeech, parseSessionCommand, formatSessionSpeech } from "./expert-commands.js";
 import { WebSpeechEngine, isAvailable as webSpeechAvailable } from "./engines/webspeech.js";
 import { HttpAsrEngine, isAvailable as httpAsrAvailable } from "./engines/http.js";
 import { makeEarsRecognizer, probeEars } from "./engines/ears.js";
@@ -915,7 +917,7 @@ export class VoiceController {
 	 * 用户说到一半（想词、换气）就被提交上半句；一个意图被拆成好几轮对话。
 	 *
 	 * 所以片段一律先经 `TurnGate` 攒着，只有
-	 *   - 静音满 `turn.silenceMs`（默认 10 秒），或
+	 *   - 静音满 `turn.silenceMs`（默认 5 秒），或
 	 *   - 用户单击语音球（手动「我说完了」），或
 	 *   - 触到单轮硬上限（连续不断说话的安全阀）
 	 * 才真正走 `runCommand` 提交一次。
@@ -1063,6 +1065,12 @@ export class VoiceController {
 		const command = parseExpertCommand(raw);
 		if (command !== null) {
 			await this.runExpertManagement(command, generation);
+			return;
+		}
+		// V1.8：专家会话命令（列/开/切/关会话），同样在润色前用规则识别。
+		const sessionCommand = parseSessionCommand(raw);
+		if (sessionCommand !== null) {
+			await this.runSessionManagement(sessionCommand, generation);
 			return;
 		}
 
@@ -1220,6 +1228,107 @@ export class VoiceController {
 		if (generation !== this.generation) return;
 		this.machine.send(EVENTS.SPEAK_END);
 		this.patch({ partial: "" });
+	}
+
+	/**
+	 * V1.8：执行一条专家会话命令（列出 / 开 / 切 / 关会话）并口头回报。
+	 *
+	 * 与专家管理命令同一状态机：不写会话、不派单，直接说话。
+	 *
+	 * @param command - `parseSessionCommand()` 的结果。
+	 * @param generation - 代号，检测期间被打断。
+	 */
+	async runSessionManagement(command, generation) {
+		this.machine.send(EVENTS.COMMAND);
+		let result;
+		let speech;
+		try {
+			if (command.kind === "session-list") {
+				const data = await listSessions();
+				const sessions = data?.sessions ?? {};
+				const parts = [];
+				for (const [id, view] of Object.entries(sessions)) {
+					const worker = (this.config.routing?.workers ?? []).find((w) => w.id === id);
+					const label = worker?.label ?? id;
+					const list = (view.sessions ?? []).map((s, i) => `${i + 1}${s.active ? "（当前）" : ""}`).join("、");
+					parts.push(`${label}：${list || "无"}`);
+				}
+				result = { ok: data?.ok === true, ...data };
+				speech = parts.length > 0 ? `专家会话情况：${parts.join("；")}。` : "现在还没有会话。";
+			} else {
+				// 把中文 label 解析成专家 id。
+				const worker = this.resolveExpertByIdOrLabel(command.expertLabel);
+				if (!worker) {
+					result = { ok: false, error: "worker-not-found" };
+					speech = formatSessionSpeech(result, command.kind);
+				} else {
+					const id = worker.id;
+					if (command.kind === "session-create") {
+						result = await createSession(id);
+						speech = formatSessionSpeech(result, "session-create");
+					} else if (command.kind === "session-switch") {
+						const data = await listSessions(id);
+						const view = data?.sessions?.[id];
+						const sessions = (view?.sessions ?? []).map((s) => s.sessionId);
+						const target = this.pickSessionId(sessions, command.index, view?.activeSessionId);
+						if (!target) {
+							result = { ok: false, error: "session-not-found" };
+							speech = formatSessionSpeech(result, "session-switch");
+						} else {
+							result = await switchSession(id, target);
+							speech = result?.ok === true ? `已切换到${worker.label}的会话。` : formatSessionSpeech(result, "session-switch");
+						}
+					} else if (command.kind === "session-close") {
+						const data = await listSessions(id);
+						const view = data?.sessions?.[id];
+						const sessions = (view?.sessions ?? []).map((s) => s.sessionId);
+						const target = this.pickSessionId(sessions, command.index, view?.activeSessionId);
+						if (!target) {
+							result = { ok: false, error: "session-not-found" };
+							speech = formatSessionSpeech(result, "session-close");
+						} else {
+							result = await closeSession(id, target);
+							speech = result?.ok === true ? `已关闭${worker.label}的一个会话。` : formatSessionSpeech(result, "session-close");
+						}
+					}
+				}
+			}
+		} catch (error) {
+			warn("会话命令失败", error?.message ?? error);
+			result = { ok: false, error: String(error?.message ?? error) };
+			speech = formatSessionSpeech(result, command.kind);
+		}
+		if (generation !== this.generation) return;
+
+		this.notice(speech, result?.ok === true ? "info" : "warn");
+		this.patch({ lastReport: speech, answer: speech, routedWorker: "", routeVia: "session-command" });
+		this.pushHistory("assistant", speech);
+		this.echoGuard.remember(speech);
+		try {
+			await this.speaker.speak(speech);
+		} catch (error) {
+			warn("会话命令播报失败", error?.message ?? error);
+		}
+		if (generation !== this.generation) return;
+		this.machine.send(EVENTS.SPEAK_END);
+		this.patch({ partial: "" });
+	}
+
+	/** 按 id 或展示名（含部分匹配）解析专家。 */
+	resolveExpertByIdOrLabel(text) {
+		const raw = String(text ?? "").trim().toLowerCase();
+		if (raw === "") return null;
+		const workers = this.config.routing?.workers ?? [];
+		return workers.find((w) => w.id === raw || String(w.label ?? "").toLowerCase() === raw)
+			?? workers.find((w) => String(w.label ?? "").toLowerCase().includes(raw) || w.id.includes(raw))
+			?? null;
+	}
+
+	/** 按序号（1-based）挑会话 id；序号为 0 时用活跃会话。 */
+	pickSessionId(sessionIds, index, activeId) {
+		if (!Array.isArray(sessionIds) || sessionIds.length === 0) return "";
+		if (Number.isInteger(index) && index > 0) return sessionIds[Math.min(index, sessionIds.length) - 1];
+		return sessionIds.includes(activeId) ? activeId : sessionIds[sessionIds.length - 1];
 	}
 
 	/** 增删后重新拉清单，更新本地配置（卡通桌宠浮层据此增减）。 */

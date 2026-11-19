@@ -40,6 +40,8 @@ import { describeExpertSkills, loadSkillCatalog } from "./lib/skills.js";
 import { createDelegationHub } from "./lib/delegation.js";
 import { createInteractionHub } from "./lib/interactions.js";
 import { createExpertManager, expertDirFromConfig } from "./lib/expert-manager.js";
+import { createExpertSessionStore } from "./lib/expert-sessions.js";
+import { createSessionManager } from "./lib/session-manager.js";
 import { labelAgentSession, registerGlobalMemory, ensureSessionNotArchived } from "./lib/identity.js";
 import { PLUGIN_VERSION } from "./lib/version.js";
 
@@ -54,6 +56,22 @@ export const inject = [];
 
 /** 下发给客户端半的全局变量名。 */
 const CLIENT_CONFIG_GLOBAL = "__VOICE_ASSISTANT_CONFIG__";
+
+/**
+ * V1.8：把会话注册表压成 health 可见的精简视图 —— 只报会话元信息与摘要条数，
+ * 不下发摘要正文（那是给模型注入用的，塞进 health 既占带宽又无意义）。
+ */
+function summarizeSessions(all) {
+	const out = {};
+	for (const [workerId, view] of Object.entries(all ?? {})) {
+		out[workerId] = {
+			sessions: (view.sessions ?? []).map((s) => ({ sessionId: s.sessionId, label: s.label, active: s.active })),
+			activeSessionId: view.activeSessionId ?? "",
+			digestCount: (view.digest ?? []).length,
+		};
+	}
+	return out;
+}
 
 /**
  * 插件主体。
@@ -104,8 +122,23 @@ export function apply(ctx, config = {}) {
 	 * `onReport` 是需求④的接线：每次汇报额外交给互动中枢排队，这样
 	 * "审批 / 提问 / 汇报"三类在客户端是**同一条按时间的流**。
 	 */
+	/**
+	 * V1.8：专家会话注册表（数据层）与管理中枢（运行层）。
+	 * sessionManager 在委托中枢之后构造，但委托中枢的记忆回调通过闭包延迟引用它
+	 * （派单发生在启动完成之后，届时变量已就绪）。
+	 */
+	let sessionManager = null;
+	const sessionStore = createExpertSessionStore(expertDirFromConfig(normalized));
+	for (const problem of sessionStore.reload()) {
+		ctx.logger?.warn?.(`voice-assistant: 会话注册表问题（已按空表处理）—— ${problem}`);
+	}
 	const delegation = createDelegationHub(ctx, normalized, {
 		onReport: (entry) => interactions.pushReport(entry),
+		// 记忆分层：派单时取该专家跨会话摘要；完成时回写要点。
+		getDigest: (workerId) => (sessionManager ? sessionManager.digestText(workerId) : ""),
+		onDigest: (workerId, entry) => {
+			if (sessionManager) sessionManager.appendDigest(workerId, entry);
+		},
 	});
 	ctx.effect(() => () => delegation.dispose(), "voice-assistant: 委托中枢生命周期");
 
@@ -208,6 +241,8 @@ export function apply(ctx, config = {}) {
 			interactions: interactions.state(),
 			/** V1.3 委托中枢自省（worker 数、在途任务、汇报游标）。 */
 			delegation: delegation.state(),
+			/** V1.8 专家会话注册表（每专家的会话列表 + 活跃会话 + 摘要条数）。 */
+			sessions: sessionStore ? summarizeSessions(sessionStore.list()) : {},
 			capabilities: {
 				polishAvailable: typeof llm?.stream === "function" && polishModel !== "",
 				polishModel,
@@ -234,10 +269,30 @@ export function apply(ctx, config = {}) {
 		ctx,
 		dir: expertDirFromConfig(normalized),
 		onWorkerBuilt: (row) => {
-			workersStatus = [...workersStatus.filter((item) => item.id !== row.id), row];
+			// V1.8：同一专家多会话以 id::sessionId 为键，避免互相覆盖。
+			const key = (item) => `${item.id}::${item.sessionId ?? ""}`;
+			workersStatus = [...workersStatus.filter((item) => key(item) !== key(row)), row];
 		},
 		onWorkerRemoved: (id) => {
 			workersStatus = workersStatus.filter((item) => item.id !== id);
+		},
+		logger: ctx.logger,
+	});
+
+	// V1.8：会话管理中枢（开/切/关会话 + 记忆摘要），HTTP 与语音命令共用。
+	sessionManager = createSessionManager({
+		store: sessionStore,
+		normalized,
+		delegation,
+		getScope: () => agentLoopScope,
+		ctx,
+		workerOf: (id) => normalized.routing.workers.find((w) => w.id === id) ?? null,
+		onSlotBuilt: (row) => {
+			const key = (item) => `${item.id}::${item.sessionId ?? ""}`;
+			workersStatus = [...workersStatus.filter((item) => key(item) !== key(row)), row];
+		},
+		onSlotRemoved: ({ id, sessionId }) => {
+			workersStatus = workersStatus.filter((item) => !(item.id === id && item.sessionId === sessionId));
 		},
 		logger: ctx.logger,
 	});
@@ -284,24 +339,49 @@ export function apply(ctx, config = {}) {
 			//      互不依赖（各自独立 session），且单个 worker 失败不连坐。
 			//      路由关闭时清单纯占位（general 指向根 agent，无需建）。
 			if (normalized.routing.enabled) {
+				// V1.8：先给每位专家在注册表里确保一个默认会话（沿用其定义里的
+				// sessionId，兼容旧会话记忆），再按注册表展开多会话建 agent。
+				for (const worker of normalized.routing.workers) {
+					if (worker.id === "general") continue;
+					const ensured = sessionStore.ensureDefault(worker);
+					if (ensured.changed) {
+						scope.logger?.info?.(`voice-assistant: 专家「${worker.label}」默认会话已登记（${ensured.session.sessionId}）`);
+					}
+				}
+
 				ensureWorkerAgents(ctx, scope, normalized, normalized.routing.workers, (row) => {
 				// 逐项上报：worker 层若卡在某一个 agent 上，health 里仍能看见
 				// 已经完成的前几位，不会只剩一个空数组让人无从下手。
-				workersStatus = [...workersStatus.filter((item) => item.id !== row.id), row];
-			}, skillCatalog)
+				// V1.8：键改成 id::sessionId。
+				const key = (item) => `${item.id}::${item.sessionId ?? ""}`;
+				workersStatus = [...workersStatus.filter((item) => key(item) !== key(row)), row];
+			}, skillCatalog, (worker) => {
+					if (worker.id === "general") return [];
+					const view = sessionStore.listFor(worker.id);
+					return view.sessions.map((s) => ({
+						sessionId: s.sessionId,
+						label: s.label,
+						active: s.sessionId === view.activeSessionId,
+					}));
+				})
 					.then((results) => {
 						workersStatus = results;
-						// V1.3：把建成且有实例引用的 worker 注册进委托中枢，
-						// 这样 /delegate 才能把任务投进它们的 inbox。
+						// V1.8：把每个会话 slot 注册进委托中枢（带 sessionId + active）。
 						for (const row of results) {
 							if (row.agent !== undefined && row.agent !== null) {
-								delegation.addWorker({ id: row.id, label: workerLabel(row.id), agent: row.agent });
+								delegation.addWorker({
+									id: row.id,
+									label: workerLabel(row.id),
+									sessionId: row.sessionId ?? "",
+									active: row.active !== false,
+									agent: row.agent,
+								});
 							}
 						}
 						const ready = results.filter((row) => row.ok === true).length;
-						const total = results.length - 1; // general 不单建。
+						const total = results.filter((row) => row.id !== "general").length;
 						scope.logger?.info?.(
-							`voice-assistant: worker 专家层就绪（${ready}/${total} 可用${total === ready ? "" : "，未就绪的路由会跳过"}），委托中枢已登记 ${delegation.workers.size} 位`,
+							`voice-assistant: worker 专家层就绪（${ready}/${total} 可用${total === ready ? "" : "，未就绪的路由会跳过"}），委托中枢已登记 ${delegation.workers.size} 个会话 slot`,
 						);
 					})
 					.catch((error) => {
@@ -444,7 +524,7 @@ export function apply(ctx, config = {}) {
 		// 2) 本机 API。注册失败（前缀冲突）只告警：语音球仍能工作，
 		//    只是润色退化为规则清理、上游 ASR/TTS 不可用。
 		try {
-			const dispose = installApiRoutes(scope, normalized, state, delegation, interactions, expertManager);
+			const dispose = installApiRoutes(scope, normalized, state, delegation, interactions, expertManager, sessionManager);
 			scope.effect(() => dispose, "voice-assistant: 本机 API");
 		} catch (error) {
 			scope.logger?.warn?.(`voice-assistant: API 路由注册失败，将退化为纯浏览器语音链路 —— ${error?.message ?? error}`);

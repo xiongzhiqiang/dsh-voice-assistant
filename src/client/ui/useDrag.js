@@ -33,7 +33,12 @@ export function useDrag(options = {}) {
 
 	const [position, setPosition] = React.useState(() => {
 		const saved = storageKey === "" ? null : readPosition(storageKey);
-		return saved ?? null; // null = 没拖过，交给 CSS 默认定位
+		if (saved === null) return null; // 没拖过，交给 CSS 默认定位
+		// 保存时的窗口可能比现在大（换显示器 / 改缩放 / 缩小窗口）。恢复时
+		// 必须按**当前视口**重新收敛，否则旧坐标会把球定位到屏幕外 —— 与
+		// "看不到就没法拖回来"形成死循环。getSize 在这里可能取不到 DOM（初始化
+		// 首帧），用传入的尺寸兜底即可，clampPosition 对尺寸是容错的。
+		return clampPosition(saved, getSize(), { w: window.innerWidth, h: window.innerHeight });
 	});
 
 	const dragRef = React.useRef(null);
@@ -107,6 +112,24 @@ export function useDrag(options = {}) {
 		onPointerUp,
 		onPointerCancel: onPointerUp,
 	}), [onPointerDown, onPointerMove, onPointerUp]);
+
+	// 窗口缩小时把已经拖过的位置重新收敛回视口。否则用户在大窗口拖好球，
+	// 缩小窗口后球留在原地（此刻已是视口外）就再也找不回来。只在有显式位置
+	// 时才处理（null = 交给 CSS 默认定位，它自己会跟着视口走）。
+	React.useEffect(() => {
+		if (storageKey === "") return undefined;
+		const onResize = () => {
+			const cur = positionRef.current;
+			if (cur === null) return;
+			const next = clampPosition(cur, getSize(), { w: window.innerWidth, h: window.innerHeight });
+			if (next.x === cur.x && next.y === cur.y) return;
+			positionRef.current = next;
+			setPosition(next);
+			writePosition(storageKey, next);
+		};
+		window.addEventListener("resize", onResize);
+		return () => window.removeEventListener("resize", onResize);
+	}, [storageKey, getSize]);
 
 	/** 清除持久位置并回到 CSS 默认定位（设置面板的"位置重置"用）。 */
 	const reset = React.useCallback(() => {

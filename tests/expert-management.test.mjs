@@ -12,6 +12,7 @@ import {
 import { expertDirFromConfig } from "../lib/expert-manager.js";
 import {
 	deriveExpertId, parseExpertCommand, formatCommandSpeech,
+	parseSessionCommand, formatSessionSpeech,
 } from "../src/client/core/expert-commands.js";
 
 const failures = [];
@@ -137,6 +138,22 @@ check("成功播报用 speech", formatCommandSpeech({ ok: true, speech: "好了�
 check("非法 id 播报", formatCommandSpeech({ ok: false, error: "invalid-id" }, "add"), "专家名字只能用字母、数字和横线。");
 check("保留 id 播报", formatCommandSpeech({ ok: false, error: "reserved-id" }, "remove"), "小凤是默认助手，不能删。");
 check("未知错误按命令类型兜底", formatCommandSpeech({ ok: false, error: "weird" }, "remove"), "没删成，请说出要删的专家名字。");
+
+// ── ⑦ V1.8 专家会话命令解析 ──────────────────────────────────────────
+check("列出会话", parseSessionCommand("列出会话")?.kind, "session-list");
+check("有哪些会话", parseSessionCommand("专家有哪些会话")?.kind, "session-list");
+check("给小因开个会话", parseSessionCommand("给小因开个会话")?.kind, "session-create");
+check("开会话带专家名", parseSessionCommand("给小因开个会话")?.expertLabel, "小因");
+check("新建专家会话", parseSessionCommand("新建小因会话")?.kind, "session-create");
+check("新建会话专家名", parseSessionCommand("新建小因会话")?.expertLabel, "小因");
+check("切换会话", parseSessionCommand("切换到小因会话")?.kind, "session-switch");
+check("切换带序号", parseSessionCommand("用小因会话2")?.index, 2);
+check("关闭会话", parseSessionCommand("关闭小因会话")?.kind, "session-close");
+check("关闭带中文序号", parseSessionCommand("删掉小因的会话二")?.index, 2);
+check("普通指令不误判为会话命令", parseSessionCommand("帮我分析这份数据"), null);
+check("列出专家不误判为会话命令", parseSessionCommand("列出专家"), null);
+check("会话错误播报", formatSessionSpeech({ ok: false, error: "last-session" }, "session-close"), "这是最后一个会话，得留一个。");
+check("会话成功播报", formatSessionSpeech({ ok: true, speech: "好了。" }, "session-create"), "好了。");
 
 if (failures.length > 0) {
 	console.error(`\n${failures.length} 项失败`);

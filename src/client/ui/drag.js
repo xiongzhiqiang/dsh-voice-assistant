@@ -120,8 +120,25 @@ export function writePosition(key, pos) {
 
 /**
  * 把位置写成可直接塞进 `style` 的对象（React 的 style prop 形状）。
- * @param pos - `{x,y}`。
+ *
+ * ⚠️ **必须显式 `position: fixed`**：`.xfv-orb` 的 CSS 默认 `position: relative`，
+ * 而这里存的 `pos` 是**视口绝对坐标**（由 `positionFromPointer` 用
+ * `getBoundingClientRect()` + `clientX/Y` 算出、并经 `clampPosition` 按视口收敛）。
+ * relative 下 `left/top` 是"相对自身原位的偏移"，把这些绝对坐标塞进去会让球
+ * 在原位基础上再叠加一次 —— 拖到视口中央，球却飞到视口外（实测原位 (746,524)
+ * 设 left:280 top:280 → 落在 (1026,804)，视口只有 974×600）。表现就是"拖一下
+ * 球就没了"，刷新后位置从 localStorage 恢复仍飞出屏幕，且看不到就没法拖回来。
+ * fixed 让 `left/top` 相对视口，与坐标语义一致。
+ *
+ * @param pos - 视口绝对坐标 `{x,y}`（应已经过 `clampPosition`）。
  */
 export function positionStyle(pos) {
-	return { left: `${pos.x}px`, top: `${pos.y}px`, right: "auto", bottom: "auto", transform: "none" };
+	return {
+		position: "fixed",
+		left: `${pos.x}px`,
+		top: `${pos.y}px`,
+		right: "auto",
+		bottom: "auto",
+		transform: "none",
+	};
 }

@@ -7,7 +7,56 @@
 一个 DSH bundle 插件：宿主半（配置 / 润色 / 路由 / worker 专家 / **专家技能** /
 **委托中枢** / **互动中枢** / 语音代理）+ 客户端半（浮层 / 状态机 / 唤醒 / 播报）。
 
-版本：`1.7.0`（V1.7 = 清理专家团队为 4 位领域专家 + 专家管理命令与接口）。
+版本：`1.8.0`（V1.8 = 专家与会话解耦 + 分层记忆 + 清理 DSH 原生团队会话）。
+
+## V1.8 的专家-会话解耦与分层记忆
+
+### 一、专家 ≠ 会话（解耦）
+
+V1.3–V1.7 里，专家与会话是**硬编码一对一**：`sessionId` 写在专家定义里，
+贯穿 `DEFAULT_WORKERS → normalizeWorkers → ensureWorkerAgents → delegation → followup`
+六个环节，一个专家只有一条会话、一份记忆。V1.8 把三者拆开：
+
+- **专家定义**（id/label/persona/description/skills）相对固定，是"能力身份"；
+- **会话**是运行时资源：每位专家有 N 个会话（至少一个默认会话），可显式
+  新建、切换、关闭；派单可指定投到哪个会话（省略则投活跃会话）；
+- **记忆分两层**：
+  - router（小凤 / 根 agent）持**全局记忆**（`memory.global` 的全局 prompt 段）；
+  - 每位专家持**属于它的多个会话** + 一份**跨会话记忆摘要**（`digest`）。
+    派单时把该专家摘要注入任务，任务完成后把要点回写摘要 —— 因此新会话
+    也能接上这位专家此前在别的会话里做过的事。
+
+注册表落在 `<expertDir>/_state/sessions.json`（子目录，避免被专家 JSON 扫描
+误读），原子写；会话 id 形如 `session-voice-worker-<id>-s<时间戳>-<随机>`。
+
+### 二、会话管理接口与语音命令
+
+HTTP（`/plugins/dsh-voice-assistant/api` 前缀）：
+
+| 方法 | 路径 | 动作 |
+|---|---|---|
+| GET | `/sessions` / `/sessions/<id>` | 列出会话 |
+| POST | `/sessions/<id>` | 开新会话（body `{label?}`） |
+| POST | `/sessions/<id>/switch` | 切换活跃会话（body `{sessionId}`） |
+| DELETE | `/sessions/<id>/<sid>` | 关闭会话 |
+| POST | `/delegate` | 新增可选 `sessionId`，指定投到哪个会话 |
+
+语音命令（润色前规则解析，与 `/sessions` 共用同一 manager）：
+「列出会话」「给小因开个会话」「切换到小因会话」「关闭小因会话 2」。
+
+### 三、专家系统 ≠ DSH 原生智能体团队
+
+常驻助手旧 root 会话里残留过 DSH 原生的 `team/task`、`team/member`、
+`subagent/catalog` 事件与 3 个 spawn 子智能体（pathologist /
+transcriptome-expert / protein-designer）—— 那是 DSH 自带团队功能留下的，
+与插件的 worker 专家系统是**两套独立机制**。V1.8 把它们彻底分开：
+
+- root session id 换成 `session-voice-assistant-root-v2`，常驻助手在**全新干净
+  会话**里启动，不带任何 team 事件；
+- 旧 root 会话 + 3 个 subagent 会话由 `tools/backup-team-sessions.mjs` **整体
+  移出** `sessions/` 到备份目录（不删除、不改名、可 `--restore` 回滚）——
+  绝不原地改名，那会触发 `assertStoredIdentity` 炸掉整个工作区；
+- 插件派单始终走自己的 worker 专家，不碰 DSH team 任务板。
 
 ## V1.7 的专家团队重整与管理
 
@@ -19,7 +68,8 @@
   `protein-designer`）是早期一次性任务留下的桌宠式子智能体（做 PPT、读片、
   蛋白设计）。其中病理、蛋白设计是长期需要的领域 → **转成正式 worker 专家**，
   转录组按用户要求一并删除（不转专家）。这一步只动插件的专家清单，
-  DSH 会话里的旧 subagent 记录**不删除**（避免 workspace 会话损坏）。
+  DSH 会话里的旧 subagent 记录当时**不删除**（避免 workspace 会话损坏）。
+  V1.8 起这些残留已由备份脚本整体移出 sessions/（见上面的 V1.8 章节）。
 - **3 个职能专家**（`coder` 编程 / `researcher` 调研 / `operator` 操作）是按
   "工具类别"分工的，但每位 worker 本来就挂 preset、有完整 bash/fs 工具，
   谁都能干这些活 → 把它们的三类能力合并进**每一位**领域专家（写进
@@ -280,7 +330,7 @@ frontmatter 需要 `name`（小写+连字符）与 `description`；正文就是�
 | 3. 语音进行 session 轮对话 | 首次使用时自建「小凤语音会话」并 `retain` 住，指令直接 `prompt` 进去；订阅该会话事件流，`turn/end` 取最后一条 assistant 文本作为回答。多轮天然成立（同一会话上下文） | `core/session.js` |
 | 4. 语音回答与播报 | 回答先按 Markdown 清洗（去代码块/链接/表格线，跳过推理块），再按句切分逐句播；引擎可选系统语音或上游 TTS | `core/text.js`、`core/tts.js` |
 | 5. 静默 1 分钟休眠；提示音/agent 消息唤醒后播报 | 进入 `active` 即武装 60s 计时，到点进 `sleeping` 并**释放麦克风**；休眠中收到 `turn/end` → 响提示音 → 直接进 `speaking` 播报 → **播完回 `active`（正在听）**，接着说话即可。手动唤醒走 点击/`Alt+Shift+V` | `core/controller.js`、`core/machine.js` |
-| **6. 声音停止满 10 秒才算一轮说完** | 识别片段先经 `TurnGate` 攒成整轮，静音满 `turn.silenceMs`（默认 10s）才提交一次；单击语音球＝立即提交；连续说话由 `turn.maxTurnMs`（5min）兜底 | `core/turn.js`、`core/controller.js` |
+| **6. 声音停止满 5 秒才算一轮说完** | 识别片段先经 `TurnGate` 攒成整轮，静音满 `turn.silenceMs`（默认 5s）才提交一次；单击语音球＝立即提交；连续说话由 `turn.maxTurnMs`（5min）兜底 | `core/turn.js`、`core/controller.js` |
 | **7. 不把模型输出/环境音回灌模型** | 播报后延迟 `ECHO_GUARD_MS` 再开麦切断声学回环；再把助手说过的话归一化后做**双向包含**比对，识别到的回声直接丢弃；思考中默认关麦 | `core/echo.js`、`core/controller.js` |
 | **8. 说话时是「播报中」而非「思考中」；说完回「正在听」继续接收语音** | 回答落地即 `thinking → speaking`；播完 `speaking → active`（**正在听**，接着说话即可，不必再喊唤醒词），静默满 60s 才休眠。用户单击打断＝同样进听写 | `core/machine.js`、`core/controller.js` |
 | **9. 常驻会话「可见但一眼可辨」** | 需求原文是"隐藏常驻会话"。DSH 里能"让会话不出现在侧边栏"的三条路**全部会把助手弄坏**（见下节证伪表），所以改成：`sessionTitle.rename()` 给它钉一个标注名（默认「小凤 · 常驻助手」）。`user` 来源会**钉住标题**，自动起名不再覆盖它 | `lib/identity.js`、`lib/config.js` 的 `session.label` |
@@ -389,7 +439,7 @@ off ──start──▶ standby ──「小凤」──▶ active ──指令
 | 防线 | 位置 | 钉死什么 |
 |---|---|---|
 | ① 回声过滤 | `handlePartial` / `handleFinal` 最前 | 助手自己刚念的话（含同音错字）不得当成用户指令 |
-| ② 轮次门槛 | `TurnGate`，唯一提交入口 | 片段 ≠ 发言；静音满 10s 或手动才提交 |
+| ② 轮次门槛 | `TurnGate`，唯一提交入口 | 片段 ≠ 发言；静音满 5s 或手动才提交 |
 | ③ 播报后静默期 | `armEchoGuard()`（从 `SPEAKING` 进 `ACTIVE`/`STANDBY` 都走） | 报完不立刻开麦，等外放余响散掉 |
 | ④ 时间地板 | `session.js` | 异步水合涌入的**历史**事件不触发回调 |
 | ⑤ 换代计数 | `generation` | 在途异步回调跨代自废 |
@@ -521,7 +571,7 @@ dsh plugin --profile web add "$PWD"
       text: ''                   # 记忆正文。global 为真但这里为空 → 开了也不生效
     agent:
       enabled: true
-      sessionId: 'session-voice-assistant-root'
+      sessionId: 'session-voice-assistant-root-v2'   # V1.8 换新，干净启动（旧会话已备份移出）
       steer: true                # 允许思考中插话纠偏（还要 turn.steerWhileThinking 也为真）
       # persona 留空用内置默认（含职责边界段：不闲聊临床/生医/科研，被问起直说职责）
     routing:                     # 两层架构第一层：小凤做 router，把指令派给专家
@@ -539,7 +589,7 @@ dsh plugin --profile web add "$PWD"
       limit: 200
       catchupWindowMs: 600000    # 追补窗口：比这更老的只记账不播（防止攒一天回来一次念完）
     turn:
-      silenceMs: 10000           # 声音停止多久 = 这一轮说完了（下界 3s / 上界 10min）
+      silenceMs: 5000            # 声音停止多久 = 这一轮说完了（下界 3s / 上界 10min）
       maxTurnMs: 300000          # 单轮硬上限：连续说话时的安全阀（自动抬到 ≥ silenceMs+5s）
       echoGuard: true            # 识别到助手自己刚念的话就丢弃
       steerWhileThinking: false  # 思考中是否开麦插话（默认关，开麦易把环境人声当插话）
@@ -550,9 +600,10 @@ dsh plugin --profile web add "$PWD"
 ```
 
 **`turn.silenceMs` 是需求「不要还没说完就提交」的主旋钮。** 调小的代价是
-用户说长句时容易被从中截断；调大的代价是每轮要多等这么久。**默认 10 秒**
-的理由：人说话的句中停顿（想词、换气、列举）一般 2–5 秒，10 秒能稳稳跨过，
-再往上加就只是纯等待了。等不及可以**单击语音球**立即提交，不必改配置。
+用户说长句时容易被从中截断；调大的代价是每轮要多等这么久。**默认 5 秒**
+（2026-11-19 从 10 秒调小）：人说话的句中停顿（想词、换气）一般 2–5 秒，
+5 秒能跨过多数停顿且等待感更短；若发现话说到一半被提交，调大这个值即可。
+等不及可以**单击语音球**立即提交，不必改配置。
 
 **密钥只留在宿主**：`asr.http.apiKey` / `tts.http.apiKey` 不会下发到浏览器
 （下发走白名单拷贝，不是黑名单删除）。
@@ -581,7 +632,7 @@ dsh plugin --profile web add "$PWD"
 > 麦克风仍然开着、随时能收到您的声音，但要再喊一次「小凤」才进入听写。
 > 若想立刻接着说，**单击一次语音球**（打断播报）即可直接进听写，不必喊唤醒词。
 
-> **为什么说到一半不提交了**：默认「声音停止满 10 秒」才算一轮结束。
+> **为什么说到一半不提交了**：默认「声音停止满 5 秒」才算一轮结束。
 > 中途转录照常显示在气泡里（标记「待提交」），只是不发给模型 ——
 > 所以界面上看到文字在涨、助手却不回，是**正常行为**，不是卡住。
 > 单击语音球可以立刻提交。
@@ -1065,7 +1116,7 @@ hydration: { bindEntryCount:0, cursorAtBind:-1, boundAt:...267, entryCountNow:11
 两个容易写错的细节，都已在代码里注明：
 
 1. **休眠计时必须排在静音提交之后**。两者都长在"静音"上：默认休眠 60s、
-   静音提交 10s，若两个截止点撞在同一次到点，休眠先执行 → 状态离开 `active`
+   静音提交 5s，若两个截止点撞在同一次到点，休眠先执行 → 状态离开 `active`
    → 整轮发言被丢掉，用户说了半天什么也没发生。所以有内容待提交时休眠下限
    抬到 `silenceMs + 5s`（默认 60s 休眠本来就更长，但用户把 `silenceMs` 调到
    接近或超过休眠阈值时，这条下界就是唯一的保护）。
@@ -1338,11 +1389,12 @@ Chrome 的 `--use-fake-device-for-media-stream` **不是静音**，它循环播�
 （`tools/_silence-60s.wav`）。
 
 **另一处是配置漂移，被哨兵断言抓住**：`cordis.patch.yml` 的
-`turn.silenceMs` 一度是 `5000`，而代码默认（`SILENCE_SUBMIT_MS`）、
-`README`、三套测试全是 `10000`，那段注释自己还前后矛盾
-（上一行写"默认 5 秒"、下一段写"取 10 秒的依据"）。
-`smoke-turn-gate` 里那条 `完成判据是 10 秒` 就是专门钉这个一致性的哨兵 ——
+`turn.silenceMs` 与代码默认（`SILENCE_SUBMIT_MS`）、`README`、三套测试
+曾出现不一致（一边 `5000`、一边 `10000`），那段注释自己还前后矛盾。
+`smoke-turn-gate` 里那条 `完成判据是 X 秒` 就是专门钉这个一致性的哨兵 ——
 **它红了不是"测试太死"，而是真的出现了"代码默认 10s、实机跑 5s"的幽灵差异**。
+2026-11-19 按用户要求统一收到 **5 秒**：四层（`cordis.patch.yml` /
+`constants.js` / `config.js` 默认 / 三套测试 + 本哨兵）已一并改齐。
 教训：改这类旋钮时，注释与值必须一起改；跨文件的一致性靠断言钉，不靠记性。
 
 ### 润色不能被原文"带跑"
@@ -1607,7 +1659,7 @@ worker 的归档自愈 `inject` 拿不到 `workspaceRegistry`，于是报
 | 离线、抗噪唤醒 | 内置 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 的中文 KWS wasm（`sherpa-onnx-kws-zipformer-wenetspeech-3.3M`，约 32 MB，GitHub Release 本机可直连），关键词用拼音写成 `x iǎo f èng`，实现真·常驻低功耗唤醒 |
 | 离线高质量识别 | 装 `dsh-ears` 并把它的后端设为 `local-whisper`，本插件 `asr.engine: ears` 即自动继承 |
 | 思考中插话 | 把 `turn.steerWhileThinking` 打开，识别到的文本以 `mode: 'steer'` 提交，实现"说错就纠"（代码已就位，默认关是怕环境人声被当插话） |
-| 更聪明的"说完了"判据 | 现在靠**纯静音时长**判一轮结束（简单、可预测、无额外依赖），默认 10s 是"够长不截半句 / 够短不干等"的折中（曾经设 60s，实测体验太长）。更好的做法是判**语义完整**：句尾语气词（"…了"、"…吧"）加权、或让模型判"这句话说完了没有"。代价是引入不确定性，需要先积累真实语料再决定阈值 |
+| 更聪明的"说完了"判据 | 现在靠**纯静音时长**判一轮结束（简单、可预测、无额外依赖），默认 5s 是"够长不截半句 / 够短不干等"的折中（曾经设 60s、10s，实测体验太长）。更好的做法是判**语义完整**：句尾语气词（"…了"、"…吧"）加权、或让模型判"这句话说完了没有"。代价是引入不确定性，需要先积累真实语料再决定阈值 |
 | 流式播报 | 上游 TTS 改 SSE 流式播放，首字延迟可降到 200ms 内 |
 | 多模态播报 | 播报时同步高亮会话里对应的那段文本（需要 `uiConversation` 的定位能力） |
 | 历史的确定性切分 | 现在靠"事件时间戳 + 2s 容差"判历史回放（见第七节坑三），同机部署够用但**依赖两端时钟一致**。更稳的做法是让事件窗口自己给出"水合完成"信号（或暴露 `hasMore`/水合轮次），从此不依赖时钟 |

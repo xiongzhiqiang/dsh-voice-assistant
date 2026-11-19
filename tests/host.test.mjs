@@ -56,7 +56,7 @@ check("下发配置标出 ASR 可用", clientConfig(withKeys).asr.httpReady, tru
 check("非 persistent 模式统一下发为 persistent", clientConfig(withKeys).session.mode, "persistent");
 check("requestedMode 回显用户原始请求", clientConfig(withKeys).session.requestedMode, "persistent");
 check("默认人格非空", normalizeConfig({}).agent.persona.length > 0, true);
-check("agent 默认 session 标识稳定", normalizeConfig({}).agent.sessionId, "session-voice-assistant-root");
+check("agent 默认 session 标识稳定", normalizeConfig({}).agent.sessionId, "session-voice-assistant-root-v2");
 
 // ── 语音应答的归一化（**只做提问，不做工具审批**）────────────────────
 //
@@ -81,10 +81,10 @@ check(
 // ── 轮次判据的归一化 ──────────────────────────────────────────────────
 //
 // 这两个值决定"什么时候算用户说完了一轮"，是整个需求的核心旋钮。
-// 归一化必须守住三条：默认 10 秒、越界夹取、以及**硬上限不得小于静音阈值**
+// 归一化必须守住三条：默认 5 秒、越界夹取、以及**硬上限不得小于静音阈值**
 // （否则静音判据永远轮不到，语义就反了 —— 用户会在说话中途被反复提交）。
 const turnDefault = normalizeConfig({}).turn;
-check("完成判据默认 10 秒", turnDefault.silenceMs, 10000);
+check("完成判据默认 5 秒", turnDefault.silenceMs, 5000);
 check("回声抑制默认开", turnDefault.echoGuard, true);
 check("思考中插话默认关", turnDefault.steerWhileThinking, false);
 check("单轮硬上限默认 5 分钟", turnDefault.maxTurnMs, 300000);
@@ -295,7 +295,7 @@ const routingDefault = normalizeConfig(undefined);
 check("路由默认开启", routingDefault.routing.enabled, true);
 check("默认 worker 有四位", routingDefault.routing.workers.length, 4);
 check("general 恒在首位", routingDefault.routing.workers[0].id, "general");
-check("general 指向根 agent", routingDefault.routing.workers[0].sessionId, "session-voice-assistant-root");
+check("general 指向根 agent", routingDefault.routing.workers[0].sessionId, "session-voice-assistant-root-v2");
 check("病理专家有独立会话", routingDefault.routing.workers.find((w) => w.id === "pathologist").sessionId, "session-voice-worker-pathologist");
 check("蛋白设计专家默认在列", routingDefault.routing.workers.some((w) => w.id === "protein-designer"), true);
 check("职能专家 coder 已撤销（不在默认清单）", routingDefault.routing.workers.some((w) => w.id === "coder"), false);

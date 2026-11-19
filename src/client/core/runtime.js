@@ -32,7 +32,7 @@ const FALLBACK = {
 	memory: { global: false, active: false },
 	// 轮次门槛：宿主缺失时也必须有一份可用默认值，否则客户端会以
 	// `undefined` 建 `TurnGate`（退化成内置默认，但界面显示会缺字段）。
-	turn: { silenceMs: 10000, maxTurnMs: 300000, echoGuard: true, steerWhileThinking: false },
+	turn: { silenceMs: 5000, maxTurnMs: 300000, echoGuard: true, steerWhileThinking: false },
 	ui: { position: "bottom-right", accent: "#2f6bff", showTranscript: true },
 	capabilities: { polishAvailable: false, asrHttpReady: false, ttsHttpReady: false, agentAvailable: false },
 };
@@ -148,11 +148,13 @@ export async function route(text) {
  * @param task - 路由改写后的任务文本。
  * @returns `{ ok, jobId?, workerId, label?, error? }`。
  */
-export async function delegate(worker, task) {
+export async function delegate(worker, task, sessionId = "") {
+	const payload = { worker, task };
+	if (sessionId !== "") payload.sessionId = sessionId;
 	const response = await request("/delegate", {
 		method: "POST",
 		headers: { "content-type": "application/json" },
-		body: JSON.stringify({ worker, task }),
+		body: JSON.stringify(payload),
 	});
 	return response.json();
 }
@@ -187,6 +189,41 @@ export async function addExpert(spec) {
  */
 export async function removeExpert(id) {
 	const response = await request(`/experts/${encodeURIComponent(id)}`, { method: "DELETE" });
+	return response.json();
+}
+
+/** V1.8：列出专家会话（不传 id = 全部）。 */
+export async function listSessions(workerId = "") {
+	const suffix = workerId === "" ? "" : `/${encodeURIComponent(workerId)}`;
+	const response = await request(`/sessions${suffix}`, { method: "GET" });
+	return response.json();
+}
+
+/** V1.8：为专家开新会话。 */
+export async function createSession(workerId, label = "") {
+	const response = await request(`/sessions/${encodeURIComponent(workerId)}`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ label }),
+	});
+	return response.json();
+}
+
+/** V1.8：切换专家的活跃会话。 */
+export async function switchSession(workerId, sessionId) {
+	const response = await request(`/sessions/${encodeURIComponent(workerId)}/switch`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ sessionId }),
+	});
+	return response.json();
+}
+
+/** V1.8：关闭专家的一个会话。 */
+export async function closeSession(workerId, sessionId) {
+	const response = await request(`/sessions/${encodeURIComponent(workerId)}/${encodeURIComponent(sessionId)}`, {
+		method: "DELETE",
+	});
 	return response.json();
 }
 

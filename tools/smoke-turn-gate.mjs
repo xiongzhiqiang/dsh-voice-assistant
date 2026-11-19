@@ -232,7 +232,7 @@ check("钩子暴露 echo 诊断线", bootInfo.hasEcho === "function", bootInfo.h
 // 这一条是本脚本的核心：宿主半必须把 turn 块下发下来。
 // 没下发的话客户端只能用内置默认，用户改 cordis.patch.yml 会"改了不生效"。
 check("首帧下发了 turn 配置", bootInfo.turnCfg !== null && typeof bootInfo.turnCfg === "object", JSON.stringify(bootInfo.turnCfg));
-check("完成判据是 10 秒", bootInfo.turnCfg?.silenceMs === 10000, String(bootInfo.turnCfg?.silenceMs));
+check("完成判据是 5 秒", bootInfo.turnCfg?.silenceMs === 5000, String(bootInfo.turnCfg?.silenceMs));
 check(
 	"完成判据在合理区间（明显大于引擎切段、又不至于干等）",
 	bootInfo.turnCfg?.silenceMs > 1000 && bootInfo.turnCfg?.silenceMs <= 30000,
@@ -263,7 +263,7 @@ check("唤醒后进入正在听", armedInfo.status === "active", `${toActive} / 
 //
 // 连送三个片段（模拟"说到一半停一下又说"），其间只等几秒。
 // 断言：一次都没提交（prompts 为空），片段全部攒在门槛里。
-// 注意每次间隔必须**明显小于** silenceMs（默认 10s），否则脚本自己会把
+// 注意每次间隔必须**明显小于** silenceMs（默认 5s），否则脚本自己会把
 // 门槛提前触发 —— 那样测出来的是"正常提交"，不是"沉住气不提交"。
 const beforePrompts = (await evaluate(`JSON.stringify(globalThis.__xfvDebug?.prompts?.() ?? [])`)) ?? "[]";
 await evaluate(`(async () => {
@@ -279,7 +279,7 @@ await sleep(2500);
 const gateState = JSON.parse((await evaluate(`JSON.stringify(globalThis.__xfvDebug?.turn?.() ?? null)`)) ?? "null");
 check("片段被攒成整轮", gateState?.text === "帮我打开D盘然后建一个文件夹名字叫项目资料", JSON.stringify(gateState));
 check("静音未满不提交（commits=0）", gateState?.commits === 0, String(gateState?.commits));
-check("倒计时已武装（dueInMs 在 0..silenceMs）", typeof gateState?.dueInMs === "number" && gateState.dueInMs > 0 && gateState.dueInMs <= 10000, String(gateState?.dueInMs));
+check("倒计时已武装（dueInMs 在 0..silenceMs）", typeof gateState?.dueInMs === "number" && gateState.dueInMs > 0 && gateState.dueInMs <= 5000, String(gateState?.dueInMs));
 
 const midPrompts = (await evaluate(`JSON.stringify(globalThis.__xfvDebug?.prompts?.() ?? [])`)) ?? "[]";
 check("静音期间没有向模型提交", JSON.parse(midPrompts).length === JSON.parse(beforePrompts).length, `before=${JSON.parse(beforePrompts).length} now=${JSON.parse(midPrompts).length}`);

@@ -129,12 +129,19 @@ const experts = await evaluate(`(() => {
     busy: cards.map(c => c.getAttribute('data-busy')),
   });
 })()`);
+// V1.7：专家清单可变（默认 4 位 + 用户自定义 + disabled 墓碑），不再硬编码
+// 数量/id。从 /experts 拿当前花名册，断言浮层与之一一对应。
+const roster = await fetch("http://127.0.0.1:3080/plugins/dsh-voice-assistant/api/experts", {
+	headers: { cookie: `dsh_token=${JSON.parse((await import("node:fs")).readFileSync("tools/_dsh-serve.json", "utf8")).token}` },
+	signal: AbortSignal.timeout(3000),
+}).then((r) => r.json()).catch(() => null);
+const expectedIds = Array.isArray(roster?.workers) ? roster.workers.map((w) => `expert-${w.id}`) : null;
 check("专家桌宠层已挂载", experts !== null, JSON.stringify(experts));
 if (experts) {
-	check("5 位专家都在浮层里", experts.count === 5, `实际 ${experts.count}`);
-	check("专家 id 正确", experts.ids.join(",") === "expert-general,expert-bioinfo,expert-coder,expert-researcher,expert-operator", experts.ids.join(","));
+	check("专家数量与实际花名册一致", expectedIds === null || experts.count === expectedIds.length, `浮层 ${experts.count} / 花名册 ${expectedIds?.length}`);
+	check("专家 id 与实际花名册一致", expectedIds === null || experts.ids.slice().sort().join(",") === expectedIds.slice().sort().join(","), `浮层 ${experts.ids.join(",")} / 花名册 ${expectedIds?.join(",")}`);
 	const loaded = experts.imgs.filter((i) => i !== null && i.w > 0);
-	check("5 张专家图都加载成功", loaded.length === 5, `${loaded.length}/5: ${JSON.stringify(experts.imgs)}`);
+	check("所有专家图都加载成功", loaded.length === experts.count, `${loaded.length}/${experts.count}: ${JSON.stringify(experts.imgs)}`);
 	// 不假设"全空闲"：上一次探针派的任务可能还在后台跑（跨探针状态污染）。
 	// 只断言工作态是合法值，真正的联动在下面主动派单后验证。
 	check("专家工作态字段合法", experts.busy.every((b) => b === "true" || b === "false"), experts.busy.join(","));
@@ -182,6 +189,10 @@ const after = await evaluate(`(() => {
 check("音球被拖动了位置", Math.abs(after.x - before.x) > 20 || Math.abs(after.y - before.y) > 20,
 	`${JSON.stringify(before)} → ${JSON.stringify(after)}`);
 check("位置写进了 localStorage", typeof after.saved === "string" && after.saved.includes('"x"'), String(after.saved));
+// 回归（"拖一下球就没了"）：拖拽后球必须真的落在视口内。positionStyle 曾用
+// relative + 视口绝对坐标，球会叠加到原位之外飞出屏幕 —— 单测只测纯函数
+// 抓不到，必须在真浏览器里查 getBoundingClientRect。
+check("拖拽后球仍在视口内", after.x > 0 && after.y > 0 && after.x < 1000 && after.y < 700, JSON.stringify(after));
 
 // 4. 刷新后位置读回
 await send("Page.reload", { ignoreCache: true });
@@ -201,45 +212,49 @@ check("刷新后音球位置从存储恢复", afterReload !== null && afterReloa
 if (afterReload !== null && afterReload.inlineLeft !== "") {
 	check("恢复的位置与拖后一致", Math.abs(afterReload.x - after.x) < 6 && Math.abs(afterReload.y - after.y) < 6,
 		`拖后 ${JSON.stringify(after)} / 刷新后 ${JSON.stringify(afterReload)}`);
+	check("刷新恢复后球仍在视口内", afterReload.x > 0 && afterReload.y > 0 && afterReload.x < 1000 && afterReload.y < 700, JSON.stringify(afterReload));
 }
 
-// 5. 工作态联动：派一个任务给 coder，浮层应切到 busy
+// 5. 工作态联动：派一个任务给某位在册专家（排除 general），浮层应切到 busy
 const s = JSON.parse((await import("node:fs")).readFileSync("tools/_dsh-serve.json", "utf8"));
 const apiBase = "http://127.0.0.1:3080/plugins/dsh-voice-assistant/api";
+const targetWorker = (Array.isArray(roster?.workers) ? roster.workers.map((w) => w.id) : [])
+	.find((id) => id && id !== "general") ?? "bioinfo";
 const delegated = await fetch(`${apiBase}/delegate`, {
 	method: "POST",
 	headers: { "content-type": "application/json", cookie: `dsh_token=${s.token}` },
-	body: JSON.stringify({ worker: "coder", task: "请写一个快速排序函数并说明复杂度。" }),
+	body: JSON.stringify({ worker: targetWorker, task: "请简要说明你的职责，一句话即可。" }),
 }).then((r) => r.json()).catch(() => null);
 check("派单成功（工作态联动前置）", delegated?.ok === true, JSON.stringify(delegated));
 if (delegated?.ok === true) {
+	const sel = `[data-xfv="expert-${targetWorker}"]`;
 	// 桌宠 1.5s 轮询一次。任务可能在几秒内完成，所以要**持续轮询**抓 busy
 	// 的那一瞬，而不是死等固定时长（否则任务跑完了反而看不到）。
 	let busyState = null;
 	for (let i = 0; i < 16; i += 1) {
 		await sleep(500);
 		busyState = await evaluate(`(() => {
-		  const c = document.querySelector('[data-xfv="expert-coder"]');
+		  const c = document.querySelector('${sel}');
 		  return c ? JSON.stringify({ busy: c.getAttribute('data-busy'), task: c.querySelector('.xfv-expert-task')?.textContent ?? '' }) : null;
 		})()`);
 		if (busyState?.busy === "true") break;
 	}
-	check("coder 桌宠切到工作中", busyState?.busy === "true", JSON.stringify(busyState));
+	check(`${targetWorker} 桌宠切到工作中`, busyState?.busy === "true", JSON.stringify(busyState));
 	if (busyState?.busy === "true") {
 		// 任务气泡是 hover 才出现的（避免常驻挡界面）。用 CDP 真移动鼠标到卡片，
 		// React 的 onMouseEnter 依赖原生 mouseover，dispatchEvent 合成的不触发。
-		const coderRect = await evaluate(`(() => {
-		  const c = document.querySelector('[data-xfv="expert-coder"]');
+		const cardRect = await evaluate(`(() => {
+		  const c = document.querySelector('${sel}');
 		  if (!c) return null;
 		  const r = c.getBoundingClientRect();
 		  return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2 });
 		})()`);
-		if (coderRect !== null) {
-			await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: coderRect.x, y: coderRect.y, button: "none", buttons: 0 });
+		if (cardRect !== null) {
+			await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: cardRect.x, y: cardRect.y, button: "none", buttons: 0 });
 		}
 		await sleep(400);
 		const hovered = await evaluate(`(() => {
-		  const c = document.querySelector('[data-xfv="expert-coder"]');
+		  const c = document.querySelector('${sel}');
 		  return JSON.stringify({ task: c?.querySelector('.xfv-expert-task')?.textContent ?? '' });
 		})()`);
 		check("hover 后桌宠显示当前任务", typeof hovered.task === "string" && hovered.task.length > 0, JSON.stringify(hovered));

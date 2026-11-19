@@ -478,7 +478,7 @@ function renderPanel(controller, snapshot, onClose) {
 				? "已关闭（不播报审批 / 提问 / 汇报）"
 				: `已开启（审批 ${controller.config.interactions?.announceApprovals === false ? "关" : "开"}，提问 ${controller.config.interactions?.announceQuestions === false ? "关" : "开"}；只播报，不代答）`,
 		),
-		row("完成判据", `静音 ${Math.round((controller.config.turn?.silenceMs ?? 10000) / 1000)} 秒提交（单击语音球可立即提交）`),
+		row("完成判据", `静音 ${Math.round((controller.config.turn?.silenceMs ?? 5000) / 1000)} 秒提交（单击语音球可立即提交）`),
 		row("回声抑制", controller.config.turn?.echoGuard === false ? "已关闭" : "已开启"),
 		// 常驻会话在侧边栏的标注名。为什么不是"隐藏"：DSH 没有安全的隐藏
 		// 机制（归档会让助手哑掉、subagent 标记会让会话连不上），所以需求 ①

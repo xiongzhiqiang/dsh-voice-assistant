@@ -3,7 +3,7 @@ import { avatarName, avatarFileFromPath, avatarUrl } from "../lib/avatars.js";
 import { projectActivities } from "../lib/activities.js";
 import { API_PREFIX as HOST_PREFIX } from "../lib/api-prefix.js";
 import { API_PREFIX as CLIENT_PREFIX } from "../src/client/core/constants.js";
-import { clampPosition, positionFromPointer, isDragGesture } from "../src/client/ui/drag.js";
+import { clampPosition, positionFromPointer, isDragGesture, positionStyle } from "../src/client/ui/drag.js";
 import { clientConfig, normalizeConfig } from "../lib/config.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -37,7 +37,7 @@ check("未知 id 的 URL 也安全", avatarUrl("/api", "../secret"), "/api/avata
 // 打包清单必须含 assets/ —— 漏了它 junction 安装看不出问题、
 // 打包安装后所有图像全消失（V1.4 的 skills/ 就是这个坑）。
 check("files 清单含 assets/", pkg.files.includes("assets/"), true);
-check("版本号与 lib/version.js 一致", pkg.version, "1.7.0");
+check("版本号与 lib/version.js 一致", pkg.version, "1.8.0");
 
 // 六张素材必须都真实存在且带 alpha（抠过图），否则运行期会出白底方块。
 const ASSET_DIR = join(process.cwd(), "assets", "characters");
@@ -101,6 +101,13 @@ check("指针位移换算", positionFromPointer({ x: 10, y: 20 }, { x: 100, y: 1
 check("小幅移动不算拖拽", isDragGesture({ x: 100, y: 100 }, { x: 103, y: 102 }), false);
 check("横向超阈值算拖拽", isDragGesture({ x: 100, y: 100 }, { x: 106, y: 100 }), true);
 check("纵向超阈值算拖拽", isDragGesture({ x: 100, y: 100 }, { x: 100, y: 106 }), true);
+// 回归：positionStyle 必须显式 fixed。CSS 里 .xfv-orb 默认 position: relative，
+// 若只给 left/top，绝对坐标会被当成相对偏移叠加 → 拖一次球就飞出视口。
+check(
+	"拖拽定位用 fixed（视口绝对坐标，不是 relative 偏移）",
+	positionStyle({ x: 280, y: 300 }),
+	{ position: "fixed", left: "280px", top: "300px", right: "auto", bottom: "auto", transform: "none" },
+);
 
 if (failures.length > 0) {
 	console.error(`\n${failures.length} 项失败：`);
