@@ -124,8 +124,10 @@ try {
 }
 check("apply 不抛错", applyError === null, applyError && applyError.message);
 check("软注入 webServer", injected.some((deps) => deps.includes("webServer")), JSON.stringify(injected));
-check("注册了一条前缀路由", routes.length === 1, `routes=${routes.length}`);
-check("路由路径正确", routes[0]?.path === "/plugins/dsh-voice-assistant/api", routes[0]?.path);
+// V1.6：API 路由 + 卡通素材路由两条（素材失败不影响 API，单独 try 注册）。
+check("注册了两条前缀路由", routes.length === 2, `routes=${routes.length}`);
+check("API 路由路径正确", routes[0]?.path === "/plugins/dsh-voice-assistant/api", routes[0]?.path);
+check("素材路由路径正确", routes[1]?.path === "/plugins/dsh-voice-assistant/api/avatars", routes[1]?.path);
 
 // 配置下发
 const table = [];

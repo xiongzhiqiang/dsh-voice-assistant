@@ -33,6 +33,7 @@
  */
 import { clientConfig, normalizeConfig } from "./lib/config.js";
 import { API_PREFIX, installApiRoutes } from "./lib/routes.js";
+import { installAvatarRoutes } from "./lib/avatars.js";
 import { agentInfo, ensurePersistentAgent } from "./lib/agent.js";
 import { ensureWorkerAgents } from "./lib/workers.js";
 import { describeExpertSkills, loadSkillCatalog } from "./lib/skills.js";
@@ -415,6 +416,15 @@ export function apply(ctx, config = {}) {
 			scope.effect(() => dispose, "voice-assistant: 本机 API");
 		} catch (error) {
 			scope.logger?.warn?.(`voice-assistant: API 路由注册失败，将退化为纯浏览器语音链路 —— ${error?.message ?? error}`);
+		}
+
+		// 2.5) 卡通形象素材（V1.6）。纯装饰路由：失败只影响图片显示，
+		//      不连坐 API / 语音链路，所以单独 try、单独告警。
+		try {
+			const disposeAvatars = installAvatarRoutes(scope, API_PREFIX);
+			scope.effect(() => disposeAvatars, "voice-assistant: 卡通形象素材");
+		} catch (error) {
+			scope.logger?.warn?.(`voice-assistant: 卡通素材路由注册失败，UI 将退回字母头像 —— ${error?.message ?? error}`);
 		}
 	});
 }

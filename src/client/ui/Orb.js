@@ -24,6 +24,8 @@ import * as React from "react";
 import { STATES } from "../core/constants.js";
 import { getController } from "../core/instance.js";
 import { h, useStore } from "./dom.js";
+import { positionStyle } from "./drag.js";
+import { useDrag } from "./useDrag.js";
 
 /** 长按判定时长（毫秒）。 */
 const LONG_PRESS_MS = 600;
@@ -67,16 +69,27 @@ export function VoiceOrb() {
 	const config = controller.config;
 	const status = snapshot.status;
 
-	/** 清除长按计时。 */
-	const clearLongPress = () => {
+	/** 清除长按计时（useCallback 稳定化，供 useDrag 回调引用）。 */
+	const clearLongPress = React.useCallback(() => {
 		if (longPressTimer.current !== null) {
 			clearTimeout(longPressTimer.current);
 			longPressTimer.current = null;
 		}
-	};
+	}, []);
 
-	/** 指针按下：起长按计时。 */
-	const onPointerDown = () => {
+	// V1.6：拟人化音球形象 + 拖拽。拖拽一开始就取消长按判定，
+	// 避免"拖一下顺手弹出设置面板"这种恼人的误触。
+	const orbUrl = config?.ui?.avatars?.orb ?? "";
+	const drag = useDrag({
+		storageKey: "orb",
+		getSize: () => ({ w: 88, h: 88 }),
+		onDragStart: clearLongPress,
+	});
+	const dragStyle = drag.position !== null ? positionStyle(drag.position) : undefined;
+
+	/** 指针按下：同时交给拖拽 hook 和长按计时。 */
+	const onPointerDown = (event) => {
+		drag.bind.onPointerDown(event);
 		longPressed.current = false;
 		clearLongPress();
 		longPressTimer.current = setTimeout(() => {
@@ -85,9 +98,14 @@ export function VoiceOrb() {
 		}, LONG_PRESS_MS);
 	};
 
-	/** 指针抬起：未触发长按则视为单击。 */
-	const onPointerUp = () => {
+	/** 指针抬起：先让拖拽 hook 收尾；判定为拖拽就不再当作单击。 */
+	const onPointerUp = (event) => {
+		drag.bind.onPointerUp(event);
 		clearLongPress();
+		if (drag.wasDrag()) {
+			longPressed.current = false;
+			return;
+		}
 		if (longPressed.current) {
 			longPressed.current = false;
 			return;
@@ -153,10 +171,13 @@ export function VoiceOrb() {
 			{
 				type: "button",
 				className: "xfv-orb",
-				title: `${HINTS[status] ?? ""}（长按设置）`,
+				style: dragStyle,
+				title: `${HINTS[status] ?? ""}（拖动可移动，长按设置）`,
 				"aria-label": `语音助手，当前${snapshot.label}。${HINTS[status] ?? ""}`,
 				onPointerDown,
+				onPointerMove: drag.bind.onPointerMove,
 				onPointerUp,
+				onPointerCancel: drag.bind.onPointerUp,
 				onPointerLeave: clearLongPress,
 				onContextMenu: (event) => {
 					event.preventDefault();
@@ -165,23 +186,31 @@ export function VoiceOrb() {
 				onKeyDown: (event) => {
 					if (event.key === "Enter" || event.key === " ") {
 						event.preventDefault();
-						onPointerUp();
+						onPointerUp({ pointerId: -1 });
 					}
 				},
 			},
 			h("span", { className: "xfv-halo" }),
-			h(
-				"svg",
-				{
-					className: "xfv-glyph",
-					viewBox: "0 0 24 24",
-					fill: "none",
-					strokeWidth: 1.9,
-					strokeLinecap: "round",
-					"aria-hidden": "true",
-				},
-				h("path", { d: GLYPH, stroke: "currentColor" }),
-			),
+			orbUrl !== ""
+				? h("img", {
+						className: "xfv-orb-face",
+						src: orbUrl,
+						alt: "",
+						draggable: false,
+						"aria-hidden": "true",
+					})
+				: h(
+						"svg",
+						{
+							className: "xfv-glyph",
+							viewBox: "0 0 24 24",
+							fill: "none",
+							strokeWidth: 1.9,
+							strokeLinecap: "round",
+							"aria-hidden": "true",
+						},
+						h("path", { d: GLYPH, stroke: "currentColor" }),
+					),
 			h("span", { className: "xfv-dot" }),
 		),
 	);

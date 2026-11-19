@@ -83,6 +83,26 @@ function css(accent) {
 .xfv-glyph { width: 24px; height: 24px; display: block; }
 .xfv-glyph path, .xkv-glyph line { stroke: var(--xfv-accent); }
 
+/* V1.6：拟人化音球形象。铺满球体，随状态轻微起伏。 */
+.xfv-orb-face {
+	width: 100%;
+	height: 100%;
+	object-fit: contain;
+	display: block;
+	pointer-events: none;
+	user-select: none;
+	-webkit-user-drag: none;
+	filter: drop-shadow(0 2px 5px rgba(47, 107, 255, 0.28));
+	transition: transform 220ms ease;
+}
+.xfv-orb:hover .xfv-orb-face { transform: translateY(-1px) scale(1.04); }
+.xfv-root[data-status="speaking"] .xfv-orb-face { animation: xfv-bob 1.1s ease-in-out infinite; }
+.xfv-root[data-status="thinking"] .xfv-orb-face { animation: xfv-bob 1.8s ease-in-out infinite; }
+@keyframes xfv-bob {
+	0%, 100% { transform: translateY(0) scale(1); }
+	50%      { transform: translateY(-3px) scale(1.03); }
+}
+
 /* 状态指示灯：球体右下角的小点 */
 .xfv-dot {
 	position: absolute;
@@ -257,10 +277,130 @@ function css(accent) {
 .xfv-session-item .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .xfv-session-item .m { color: var(--xfv-sub); font-size: 11px; }
 
+/* ── 专家桌宠层（V1.6）──────────────────────────────────────────── */
+.xfv-experts {
+	position: fixed;
+	left: 18px;
+	top: 92px;
+	z-index: 2147482900; /* 略低于语音球，避免盖住音球 */
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 6px;
+	pointer-events: none;
+	font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+	color: var(--xfv-ink, #171a21);
+}
+.xfv-experts-toggle {
+	pointer-events: auto;
+	width: 26px;
+	height: 26px;
+	border-radius: 8px;
+	border: 1px solid var(--xfv-border, rgba(16, 24, 40, 0.10));
+	background: var(--xfv-surface, rgba(255, 255, 255, 0.94));
+	box-shadow: 0 4px 12px rgba(16, 24, 40, 0.12);
+	cursor: pointer;
+	font-size: 13px;
+	line-height: 1;
+	color: var(--xfv-sub, #5b6472);
+}
+.xfv-experts-row { display: flex; flex-direction: column; gap: 8px; }
+
+.xfv-expert {
+	pointer-events: auto;
+	position: relative;
+	width: 64px;
+	cursor: grab;
+	touch-action: none; /* 触屏拖拽时不要滚页面 */
+	user-select: none;
+	-webkit-user-select: none;
+}
+.xfv-expert:active { cursor: grabbing; }
+
+.xfv-expert-figure {
+	position: relative;
+	width: 64px;
+	height: 64px;
+	border-radius: 14px;
+	background: var(--xfv-surface, rgba(255, 255, 255, 0.9));
+	border: 1px solid var(--xfv-border, rgba(16, 24, 40, 0.10));
+	box-shadow: 0 5px 16px rgba(16, 24, 40, 0.14);
+	overflow: visible;
+	transition: transform 180ms ease, box-shadow 180ms ease;
+}
+.xfv-expert:hover .xfv-expert-figure { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(16, 24, 40, 0.2); }
+.xfv-expert[data-busy="true"] .xfv-expert-figure {
+	animation: xfv-expert-work 1.6s ease-in-out infinite;
+	border-color: rgba(247, 144, 9, 0.6);
+	box-shadow: 0 5px 16px rgba(247, 144, 9, 0.28);
+}
+@keyframes xfv-expert-work {
+	0%, 100% { transform: translateY(0) rotate(-1deg); }
+	50%      { transform: translateY(-3px) rotate(1deg); }
+}
+.xfv-expert-img {
+	width: 100%;
+	height: 100%;
+	object-fit: contain;
+	display: block;
+	pointer-events: none;
+	user-select: none;
+	-webkit-user-drag: none;
+}
+.xfv-expert-initial {
+	display: grid;
+	place-items: center;
+	width: 100%;
+	height: 100%;
+	font-size: 26px;
+	font-weight: 700;
+	color: var(--xfv-accent, #2f6bff);
+}
+.xfv-expert-status {
+	position: absolute;
+	right: -2px;
+	bottom: -2px;
+	width: 12px;
+	height: 12px;
+	border-radius: 50%;
+	border: 2px solid var(--xfv-surface, #fff);
+	background: #12b76a;
+}
+.xfv-expert[data-busy="true"] .xfv-expert-status { background: #f79009; }
+.xfv-expert-name {
+	text-align: center;
+	font-size: 11px;
+	line-height: 1.3;
+	margin-top: 3px;
+	color: var(--xfv-sub, #5b6472);
+	text-shadow: 0 1px 2px rgba(255, 255, 255, 0.9);
+}
+.xfv-expert-task {
+	position: absolute;
+	left: calc(100% + 8px);
+	top: 0;
+	width: 190px;
+	padding: 8px 10px;
+	border-radius: 10px;
+	background: var(--xfv-surface, rgba(255, 255, 255, 0.96));
+	border: 1px solid var(--xfv-border, rgba(16, 24, 40, 0.10));
+	box-shadow: var(--xfv-shadow, 0 10px 30px rgba(16, 24, 40, 0.16));
+	font-size: 12px;
+	line-height: 1.5;
+	color: var(--xfv-ink, #171a21);
+	word-break: break-word;
+}
+.xfv-expert-task b { display: block; margin-bottom: 3px; color: #f79009; }
+
+@media (prefers-color-scheme: dark) {
+	.xfv-expert-figure, .xfv-expert-toggle, .xfv-expert-task { background: rgba(28, 32, 40, 0.94); }
+	.xfv-expert-name { color: #a4adbb; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8); }
+}
+
 /* 减少动效偏好：关掉所有动画，避免前庭不适 */
 @media (prefers-reduced-motion: reduce) {
-	.xfv-halo, .xfv-bubble { animation: none; }
-	.xfv-orb { transition: none; }
+	.xfv-halo, .xfv-bubble, .xfv-orb-face, .xfv-expert-figure { animation: none; }
+	.xfv-orb, .xfv-orb-face, .xfv-expert-figure { transition: none; }
 }
 `;
 }

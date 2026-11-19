@@ -7,7 +7,36 @@
 一个 DSH bundle 插件：宿主半（配置 / 润色 / 路由 / worker 专家 / **专家技能** /
 **委托中枢** / **互动中枢** / 语音代理）+ 客户端半（浮层 / 状态机 / 唤醒 / 播报）。
 
-版本：`1.4.0`（V1.4 = V1.3 派单链 + 需求①专家技能与自加入口 + 需求④统一互动流）。
+版本：`1.6.0`（V1.6 = V1.5 三处口径修正 + 卡通专家桌宠 + 拟人化可拖拽音球）。
+
+## V1.6 的视觉层：卡通专家桌宠 + 拟人化音球
+
+两位一体的浮层，都注册在官方 `shell.overlay` 槽（各自独立 id、独立 z-index）：
+
+- **专家桌宠**：五位专家各有一张 Q 版卡通形象（AI 生成、透明底 PNG），
+  从左边的竖排浮层里探出，随各自 worker 的忙闲切换姿态 —— 空闲时静止、
+  干活时轻微起伏并亮起橙色状态点、hover 显示当前任务。位置可拖拽并持久化。
+- **拟人化音球**：语音球从纯 SVG 声波图标换成一张有表情的球形精灵，
+  说话/思考时轻轻上下浮动；**按住拖动即可移动**，位置存 localStorage，
+  刷新后还在；单击唤醒/提交、长按设置、右键设置的语义全部保留。
+
+与已安装的 `whale-girl` 桌宠**完全独立**：不读它的 bundle、不改它的
+manifest、不占它的槽，只是借了"桌宠浮在整个界面之上"这个交互形态。
+两个可以同时显示，互不干扰。
+
+实现要点：
+
+- 六张素材在 `assets/characters/{general,bioinfo,coder,researcher,operator,orb}.png`，
+  经宿主半 `/api/avatars/<name>.png` 白名单路由提供（**路径白名单**，非通用静态
+  服务，`..`/非白名单文件一律 404）。`package.json.files` 必须含 `assets/`，
+  否则打包安装后图全丢（V1.4 的 `skills/` 同款坑，已有单测钉住）。
+- 桌宠轮询轻量端点 `/api/activities`（几十字节），数据来自委托中枢的
+  `activeJobs`，由 `lib/activities.js` 投影出各专家的 `busy/task/elapsedMs`。
+  刻意不轮询 `/health`（几 KB 大对象，1.5s 一次太重）。端点不可用时整层静默隐藏。
+- 拖拽几何（`clampPosition` / `positionFromPointer` / `isDragGesture`）是纯函数，
+  由 `tests/visuals.test.mjs` 数值钉死四角与窗口缩放回收；
+  指针用 `setPointerCapture`，触屏与鼠标一致；移动超过 5px 才判定为拖拽，
+  一旦拖拽就抑制这次的单击/长按，不误触发唤醒或设置面板。
 
 ## 两层 agent 架构（V1.4 现行行为）
 
@@ -1545,7 +1574,11 @@ lib/delegation.js           V1.3 委托中枢：派单、结果捕获、LLM 汇�
 lib/interactions.js         V1.4 互动中枢：旁听 session/event（审批/提问）、与汇报合流成一条按 at 排序的队列
 lib/interaction-kinds.js    互动类型常量（宿主与客户端共用；改一处不会漏另一处）
 lib/report.js               V1.3 汇报队列：严格单调游标、规则降级摘要、可朗读文案；V1.5 加 **`condenseArtifacts`（路径→「N 个文件，都在工作目录下」）**
+lib/api-prefix.js           宿主侧 API 前缀单一来源（避免 config.js 与 routes.js 循环依赖）
+lib/avatars.js              V1.6 卡通素材：id→文件白名单、路径净化、/api/avatars 静态路由
+lib/activities.js           V1.6 工作态投影：activeJobs → 各专家 busy/task/elapsedMs（纯函数）
 lib/version.js              版本号唯一来源（health 引用；单测钉住与 package.json 一致）
+assets/characters/          V1.6 六张 AI 生成 + 抠图的透明底 PNG（5 位专家 + 音球）
 lib/polish.js               转录润色（llm.stream）+ 跑偏检测 + 规则兜底
 lib/upstream.js             OpenAI 兼容 ASR/TTS 代理
 lib/routes.js               /health /config /polish /route /delegate /reports /interactions /asr /tts
@@ -1563,9 +1596,12 @@ src/client/core/ledger.js   V1.5 播报账本：持久化游标 + 已播 key 集
 src/client/core/text.js     播报前清洗、分句、事件取文本（兼容 data 包裹）
 src/client/core/audio/wav.js 浏览器录音 → 16k 单声道 PCM16 WAV（本地 Whisper 等后端的硬要求；含宿主侧判定的忠实复刻）
 src/client/core/engines/    webspeech.js | http.js | ears.js（ears 内含命名空间多路取法 + 按后端决定是否转码）
-src/client/ui/Orb.js        语音球 + 状态面板 + 待提交倒计时 + 会话切换区
+src/client/ui/Orb.js        语音球（V1.6 拟人形象 + 拖拽）+ 状态面板 + 待提交倒计时 + 会话切换区
+src/client/ui/Experts.js    V1.6 专家桌宠层：轮询 /activities、忙闲姿态、任务气泡、可拖拽
+src/client/ui/drag.js       V1.6 拖拽纯函数：边界收敛 / 指针换算 / 手势阈值 / 位置持久化
+src/client/ui/useDrag.js    V1.6 拖拽 hook：pointer capture + 点击/拖拽区分
 src/client/ui/styles.js     浮层样式（跟随系统深浅色）
-src/client/ui/fallback-mount.js 槽未声明时的兜底挂载
+src/client/ui/fallback-mount.js 槽未声明时的兜底挂载（V1.6 支持一次挂多个组件）
 build.mjs                   零依赖 ESM → classic script 打包器
 tests/                      宿主与客户端纯逻辑单元测试（含事件水合时序、轮次门槛、回声判据、跨会话）
 tools/                      冒烟、装机验收（verify-live）、真浏览器探针（cdp-probe）、调研脚本

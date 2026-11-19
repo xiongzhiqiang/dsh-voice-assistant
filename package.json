@@ -1,6 +1,6 @@
 {
 	"name": "dsh-voice-assistant",
-	"version": "1.5.0",
+	"version": "1.6.0",
 	"description": "「小凤」always-on voice assistant for DeepSeek Harness: wake-word standby, speech transcription with LLM polish, voice-driven multi-turn session dialogue, spoken replies, and a 60s idle-sleep cycle that wakes on a chime or an incoming agent message.",
 	"type": "module",
 	"main": "index.js",
@@ -47,16 +47,18 @@
 		"index.js",
 		"lib/",
 		"skills/",
+		"assets/",
 		"cordis.patch.yml",
 		"README.md"
 	],
 	"scripts": {
 		"build": "node build.mjs",
 		"check": "node build.mjs --check",
-		"test": "node --test tests/host.test.mjs tests/experts.test.mjs tests/client-core.test.mjs tests/questions.test.mjs",
+		"test": "node --test tests/host.test.mjs tests/experts.test.mjs tests/client-core.test.mjs tests/questions.test.mjs tests/visuals.test.mjs",
 		"check:sessions": "node tools/check-session-integrity.mjs",
 		"verify": "node tools/check-session-integrity.mjs && node tools/smoke-host.mjs && node tools/smoke-agent-route.mjs",
 		"probe:ledger": "node tools/cdp-ledger-probe.mjs",
-		"probe:delegation": "node tools/smoke-delegation-http.mjs"
+		"probe:delegation": "node tools/smoke-delegation-http.mjs",
+		"probe:visuals": "node tools/cdp-visuals-probe.mjs"
 	}
 }

@@ -186,6 +186,19 @@ export async function interactions(after) {
 }
 
 /**
+ * V1.6：取专家工作态（卡通桌宠的忙闲 + 当前任务）。
+ * @returns `{ at, workers:[{id,label,busy,task,...}], activeCount }`；失败返回 null。
+ */
+export async function activities() {
+	try {
+		const response = await request("/activities", { method: "GET" });
+		return await response.json();
+	} catch {
+		return null;
+	}
+}
+
+/**
  * 请求上游转写（仅 http 引擎使用）。
  * @param blob - 音频。
  * @param language - 语言提示。

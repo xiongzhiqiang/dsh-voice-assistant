@@ -27,8 +27,9 @@ import { VoiceController } from "./core/controller.js";
 import { setController, clearController } from "./core/instance.js";
 import { unlockAudio } from "./core/chime.js";
 import { VoiceOrb } from "./ui/Orb.js";
+import { ExpertTeam } from "./ui/Experts.js";
 import { installStyles } from "./ui/styles.js";
-import { scheduleFallback } from "./ui/fallback-mount.js";
+import { scheduleFallbackPair } from "./ui/fallback-mount.js";
 
 /** 需要 `slots` 服务（槽注册的唯一入口）。 */
 export const inject = ["slots"];
@@ -88,7 +89,8 @@ function mount(ctx) {
 	//    没有声明 `shell.overlay`，`slots.inject` 会**永远静默等待**
 	//    （不抛错、不渲染）。超时后直接把语音球挂到 body 上，
 	//    把"装了但界面上没有"变成"看起来正常"。
-	const fallback = scheduleFallback(VoiceOrb, () =>
+	// V1.6：兜底时语音球与专家桌宠一起挂（两者都是 fixed 定位，互不干扰）。
+	const fallback = scheduleFallbackPair([VoiceOrb, ExpertTeam], () =>
 		warn("没有等到 shell.overlay 槽（可能是自定义整壳未声明），已兜底挂载到页面。"),
 	);
 	ctx.effect(
@@ -98,6 +100,17 @@ function mount(ctx) {
 				return ctx.slots.register({ name: "shell.overlay", id: "voice-assistant", order: 60 }, VoiceOrb);
 			}),
 		"voice-assistant: 语音球浮层",
+	);
+
+	// 1b) V1.6 专家桌宠层。与语音球并列的另一个浮层条目，独立 id。
+	//     它自己会轮询 /activities，端点不可用时整层静默隐藏，
+	//     所以这里不需要额外的降级/告警逻辑。
+	ctx.effect(
+		() =>
+			ctx.slots.inject("shell.overlay", () =>
+				ctx.slots.register({ name: "shell.overlay", id: "voice-assistant-experts", order: 55 }, ExpertTeam),
+			),
+		"voice-assistant: 专家桌宠浮层",
 	);
 
 	// 2) 全局快捷键。
@@ -124,7 +137,9 @@ function mount(ctx) {
 		() => () => {
 			if (typeof window !== "undefined") window.removeEventListener("keydown", onKeyDown);
 			fallback.cancel();
-			if (typeof document !== "undefined") document.getElementById("xfv-fallback-host")?.remove();
+			if (typeof document !== "undefined") {
+				document.querySelectorAll('[id^="xfv-fallback-host"]').forEach((node) => node.remove());
+			}
 			controller.dispose();
 			clearController();
 			disposeStyles();

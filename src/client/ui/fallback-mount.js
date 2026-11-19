@@ -31,12 +31,12 @@ const FALLBACK_DELAY_MS = 2500;
  * @param component - React 组件。
  * @returns 卸载函数；环境不具备 DOM 时返回 `null`。
  */
-export function mountToBody(component) {
+export function mountToBody(component, hostId = HOST_ID) {
 	if (typeof document === "undefined" || document.body === null) return null;
-	if (document.getElementById(HOST_ID) !== null) return null;
+	if (document.getElementById(hostId) !== null) return null;
 
 	const host = document.createElement("div");
-	host.id = HOST_ID;
+	host.id = hostId;
 	// 宿主本身不参与布局：子组件自己 fixed 定位。
 	host.style.position = "fixed";
 	host.style.inset = "0";
@@ -89,16 +89,46 @@ export function mountToBody(component) {
  * @returns `{ cancel, settle }`：`settle()` 表示槽已成功注册，取消兜底。
  */
 export function scheduleFallback(component, onFallback) {
+	return scheduleFallbackPair([component], onFallback);
+}
+
+/**
+ * V1.6：一次兜底挂载多个组件（语音球 + 专家桌宠）。
+ *
+ * 与单组件版共用同一套超时与 settle 语义；差别只是每个组件各拿一个
+ * 独立宿主节点（都 fixed 定位、互不遮挡），卸载时一并收掉。之所以不让
+ * 它们共用一个 body 宿主：`mountToBody` 用固定 id 且只允许一个实例，
+ * 两个组件塞同一个 React 根会互相覆盖状态。
+ *
+ * @param components - React 组件数组。
+ * @param onFallback - 兜底发生时的回调。
+ * @returns `{ cancel, settle }`。
+ */
+export function scheduleFallbackPair(components, onFallback) {
+	const list = Array.isArray(components) ? components : [];
 	const timer = setTimeout(() => {
-		const dispose = mountToBody(component);
-		if (dispose !== null) onFallback?.();
+		const disposers = list
+		.map((component, index) => mountToBody(component, index === 0 ? HOST_ID : `${HOST_ID}-${index}`))
+		.filter((fn) => typeof fn === "function");
+		if (disposers.length > 0) onFallback?.();
+		activeDisposers = disposers;
 	}, FALLBACK_DELAY_MS);
+
+	let activeDisposers = [];
 	return {
 		settle() {
 			clearTimeout(timer);
 		},
 		cancel() {
 			clearTimeout(timer);
+			for (const dispose of activeDisposers) {
+				try {
+					dispose();
+				} catch {
+					// 已卸载。
+				}
+			}
+			activeDisposers = [];
 		},
 	};
 }
