@@ -39,6 +39,7 @@ import { ensureWorkerAgents } from "./lib/workers.js";
 import { describeExpertSkills, loadSkillCatalog } from "./lib/skills.js";
 import { createDelegationHub } from "./lib/delegation.js";
 import { createInteractionHub } from "./lib/interactions.js";
+import { createExpertManager, expertDirFromConfig } from "./lib/expert-manager.js";
 import { labelAgentSession, registerGlobalMemory, ensureSessionNotArchived } from "./lib/identity.js";
 import { PLUGIN_VERSION } from "./lib/version.js";
 
@@ -137,6 +138,14 @@ export function apply(ctx, config = {}) {
 	/** Worker 层整体失败原因（catch 必须留可见结论，否则真实错误被日志吞掉）。 */
 	let workersError = "";
 	/**
+	 * V1.7：agentLoop scope 的引用。管理接口热更新时要建新专家的常驻 agent，
+	 * 必须复用启动时的同一 scope —— 在 `ctx.inject(["agentLoop"], scope => …)`
+	 * 回调里赋值（见下方），getScope 供 expert-manager 取用。
+	 */
+	let agentLoopScope = null;
+	/** V1.7：专家管理中枢（apply 稍后构造，API 路由注册前就绪）。 */
+	let expertManager = null;
+	/**
 	 * 根 agent 的 preset 挂载结果（坑十三：不挂 preset 的 agent 没有文件/命令
 	 * 工具；health 可见，`{mounted,id?|reason?}`）。
 	 */
@@ -212,8 +221,29 @@ export function apply(ctx, config = {}) {
 		};
 	};
 
+	// V1.7：专家管理中枢。组装在 apply 顶层、API 注册前，确保 routes 拿到的是
+	// 同一个实例。`config`（apply 的原始入参）用于重扫目录；normalized 的
+	// routing.workers 数组会被原地更新，routes.js / clientConfig 持有的引用
+	// 因此自动看到最新清单。
+	expertManager = createExpertManager({
+		originalConfig: config,
+		normalized,
+		delegation,
+		skillCatalog,
+		getScope: () => agentLoopScope,
+		ctx,
+		dir: expertDirFromConfig(normalized),
+		onWorkerBuilt: (row) => {
+			workersStatus = [...workersStatus.filter((item) => item.id !== row.id), row];
+		},
+		onWorkerRemoved: (id) => {
+			workersStatus = workersStatus.filter((item) => item.id !== id);
+		},
+		logger: ctx.logger,
+	});
+
 	ctx.logger?.info?.(
-		`voice-assistant: 宿主半已就绪（唤醒词「${normalized.wake.word}」，休眠 ${Math.round(normalized.sleep.idleTimeoutMs / 1000)}s，API ${API_PREFIX}）`,
+		`voice-assistant: 宿主半已就绪（唤醒词「${normalized.wake.word}」，休眠 ${Math.round(normalized.sleep.idleTimeoutMs / 1000)}s，API ${API_PREFIX}，专家 ${normalized.routing.workers.length} 位）`,
 	);
 
 	// 0) 全局记忆：注册在**根作用域**的 prompt 段，对 DSH 全部会话生效。
@@ -246,6 +276,8 @@ export function apply(ctx, config = {}) {
 	//    agentAvailable=false 并退回「专用会话」模式。
 	if (normalized.agent.enabled) {
 		ctx.inject(["agentLoop"], (scope) => {
+			// V1.7：保存 scope 供管理接口热更新时建新专家 agent。
+			agentLoopScope = scope;
 			let settled = false;
 
 			// 0.5) Worker 专家 agent（两层架构的第二层）。与根 agent 并行建立：
@@ -412,7 +444,7 @@ export function apply(ctx, config = {}) {
 		// 2) 本机 API。注册失败（前缀冲突）只告警：语音球仍能工作，
 		//    只是润色退化为规则清理、上游 ASR/TTS 不可用。
 		try {
-			const dispose = installApiRoutes(scope, normalized, state, delegation, interactions);
+			const dispose = installApiRoutes(scope, normalized, state, delegation, interactions, expertManager);
 			scope.effect(() => dispose, "voice-assistant: 本机 API");
 		} catch (error) {
 			scope.logger?.warn?.(`voice-assistant: API 路由注册失败，将退化为纯浏览器语音链路 —— ${error?.message ?? error}`);

@@ -7,7 +7,59 @@
 一个 DSH bundle 插件：宿主半（配置 / 润色 / 路由 / worker 专家 / **专家技能** /
 **委托中枢** / **互动中枢** / 语音代理）+ 客户端半（浮层 / 状态机 / 唤醒 / 播报）。
 
-版本：`1.6.0`（V1.6 = V1.5 三处口径修正 + 卡通专家桌宠 + 拟人化可拖拽音球）。
+版本：`1.7.0`（V1.7 = 清理专家团队为 4 位领域专家 + 专家管理命令与接口）。
+
+## V1.7 的专家团队重整与管理
+
+### 一、团队清理（做减法 + 能力合并）
+
+原先的专家团队有两套并行的东西，V1.7 把它们理顺成一套：
+
+- **根会话里的 3 个 subagent**（`pathologist` / `transcriptome-expert` /
+  `protein-designer`）是早期一次性任务留下的桌宠式子智能体（做 PPT、读片、
+  蛋白设计）。其中病理、蛋白设计是长期需要的领域 → **转成正式 worker 专家**，
+  转录组按用户要求一并删除（不转专家）。这一步只动插件的专家清单，
+  DSH 会话里的旧 subagent 记录**不删除**（避免 workspace 会话损坏）。
+- **3 个职能专家**（`coder` 编程 / `researcher` 调研 / `operator` 操作）是按
+  "工具类别"分工的，但每位 worker 本来就挂 preset、有完整 bash/fs 工具，
+  谁都能干这些活 → 把它们的三类能力合并进**每一位**领域专家（写进
+  `GENERAL_CAPABILITIES` 段与 general 的兜底 persona），然后**删掉这三位**。
+
+清理后的默认清单（4 位）：
+
+| Worker | 会话 | 领域职责 | 通用能力 | 技能 |
+|---|---|---|---|---|
+| `general`（小凤·通用） | 根 agent 会话（兜底，不委托） | 杂项与无归属指令 | ✔ | — |
+| `bioinfo`（小因·基因分析） | `session-voice-worker-bioinfo-v2` | 体细胞突变/变异分级/出报告 | ✔ | `somatic-mutation-report` |
+| `pathologist`（小理·病理分析） | `session-voice-worker-pathologist` | 病理读片/肿瘤检测/诊断意见 | ✔ | — |
+| `protein-designer`（小蛋·蛋白设计） | `session-voice-worker-protein-designer` | 结合物设计/结构预测/序列优化 | ✔ | — |
+
+两位新专家复用语义最接近的现有素材（病理→放大镜学者图、蛋白设计→实验室图），
+直到为它们生成专属形象。
+
+### 二、增加/删除专家：命令 + 接口（持久化 + 热生效）
+
+新增/删除专家是**写文件 + 当场生效**，不必重启：
+
+- **HTTP 接口**（`/plugins/dsh-voice-assistant/api/experts`）：
+  - `GET /experts` —— 列出当前专家、自定义专家、墓碑与目录问题；
+  - `POST /experts` —— 新增（`{"id","label","description","persona?","skills?"}`）；
+  - `DELETE /experts/<id>` —— 删除。自定义专家删文件；**内置专家写
+    `{"disabled":true}` 墓碑**压过默认清单（否则一重启就复活）。
+- **语音命令**（润色前用规则识别，不进 LLM 路由）：
+  - "列出专家 / 有哪些专家" —— 播报当前阵容；
+  - "新增专家 化学，负责化学分析" —— 自动派生 id（英文用 slug、中文用稳定
+    哈希），播报里告知编号；也可说 "id 叫 chem" 显式指定；
+  - "删除专家 化学" —— 按 id 或名字删除。
+
+写入落到 `routing.expertDirs[0]`（没配则用 `~/.dsh/voice-assistant/experts`），
+与既有"丢 JSON 即生效"的扩展入口**完全同源**——管理接口只是替用户做校验与
+原子写入，没有第二套真相来源。写完后用原始配置重扫 + 原地更新
+`config.routing.workers`：新增的当场建 agent 并注册委托中枢，删除的从派单表
+注销。因此增删改**当场可用**，重启后仍持久（真机冒烟已验证 health 清单热更新）。
+
+安全约束：id 只允许 `[a-z0-9][a-z0-9_-]*`（杜绝路径穿越），general 不可删，
+写入走"临时文件 + rename"原子替换。
 
 ## V1.6 的视觉层：卡通专家桌宠 + 拟人化音球
 
@@ -40,7 +92,7 @@ manifest、不占它的槽，只是借了"桌宠浮在整个界面之上"这个�
 
 ## 两层 agent 架构（V1.4 现行行为）
 
-「小凤」本体是 **router（第一层）**，五位**常驻专家 agent 是 worker（第二层）**。
+「小凤」本体是 **router（第一层）**，四位**常驻专家 agent 是 worker（第二层）**（V1.7 起；V1.4–V1.6 为五位）。
 V1.1/1.2 会切到 worker 会话旁听每一步，V1.3 已按用户要求改成**只派单、只播报要点**；
 V1.4 加上**专家技能**与**统一互动流**：
 
@@ -58,13 +110,15 @@ V1.4 加上**专家技能**与**统一互动流**：
                       小凤按 at 严格升序依次播报（听到的顺序 = 发生的顺序）
 ```
 
-| Worker | 会话 | 职责 | 技能 |
+| Worker | 会话 | 领域职责 | 技能 |
 |---|---|---|---|
-| `general`（小凤·通用） | 根 agent 会话（兜底，不委托） | 闲聊、问答、杂项 | — |
+| `general`（小凤·通用） | 根 agent 会话（兜底，不委托） | 杂项与无归属指令（含通用执行能力） | — |
 | `bioinfo`（小因·基因分析） | `session-voice-worker-bioinfo-v2` | 体细胞突变检测/注释、变异临床分级、可靶向性、出报告 | `somatic-mutation-report` |
-| `coder`（阿码·编程） | `session-voice-worker-coder-v2` | 写代码、调试、重构、跑测试 | — |
-| `researcher`（阿研·调研） | `session-voice-worker-researcher-v2` | 查资料、总结、写报告 | — |
-| `operator`（阿卓·操作） | `session-voice-worker-operator` | 文件/目录、打开程序、执行命令 | — |
+| `pathologist`（小理·病理分析） | `session-voice-worker-pathologist` | 病理读片、肿瘤细胞检测、分级、诊断意见 | — |
+| `protein-designer`（小蛋·蛋白设计） | `session-voice-worker-protein-designer` | 结合物设计、结构预测评估、序列优化 | — |
+
+> V1.7 已撤销 coder / researcher / operator 三位职能专家：编程、调研、本机
+> 操作三类能力**合并进上面每一位**专家（见本章开头）。
 
 设计要点（详见「架构注记」）：
 
@@ -173,9 +227,11 @@ V1.4 之后按真机反馈收紧了三件事，都不是新功能，而是**把�
 { "id": "chem", "label": "小化 · 化学", "description": "分子建模与性质预测。" }
 ```
 
-**目录是「追加」而不是「替换」**：只配了目录时，默认五位专家一位不少，目录里
+**目录是「追加」而不是「替换」**：只配了目录时，默认四位专家一位不少，目录里
 同 id 的文件会覆盖默认那位（只改 `label` 也行，人格/描述/技能自动继承模板）。
 内联写了 `workers`/`experts` 则是**完整花名册**（严格按你写的来），目录只补新 id。
+V1.7 起目录里的 `{"id":"xxx","disabled":true}` 是**删除墓碑**，会从最终清单剔除
+该 id（管理接口的删除就靠它），这也是删除内置专家能持久生效的原因。
 
 技能名写错、JSON 写坏都不会让整层塌掉：坏文件被跳过并记进 `problems`，
 启动日志里逐条可见，`/health.routing.problems` 也能查到。
@@ -473,7 +529,7 @@ dsh plugin --profile web add "$PWD"
       timeoutMs: 10000           # 路由 LLM 超时。**冷启动首调约 6s**，别调到 6s 附近
       jobTimeoutMs: 300000       # 单个委托最长等待（等待人工审批的任务按失败汇报）
       reportPollMs: 1500         # /reports 轮询间隔
-      workers: []                # 内联专家清单（空 = 用内置 5 位）
+      workers: []                # 内联专家清单（空 = 用内置 4 位；V1.7 起）
       expertDirs: []             # 专家目录：每个 *.json 一位，丢文件即生效
     interactions:                # 统一互动流（审批 / 提问 / 汇报按时间播报）
       enabled: true
@@ -1566,11 +1622,15 @@ index.js                    宿主半入口：配置归一化、配置下发、A
 lib/config.js               配置归一化 + 客户端白名单裁剪（含 turn 的夹取与语义保护）
 lib/identity.js             宿主半身份：常驻会话可见性标注 + 全局记忆注册 + **归档自愈**（含「隐藏不可行」证伪表）
 lib/agent.js                常驻 agent：模型路由解析/落盘、**人格段（V1.5 含职责边界）**、**preset 挂载（mountAgentPreset）**、生命周期
-lib/workers.js              worker 专家层：默认五位专家、多来源合并（workers/experts/expertDirs）、归一化、批量建立（逐项进度 + 建立/归档自愈双超时）、技能桥
+lib/workers.js              worker 专家层：默认四位领域专家（V1.7）、多来源合并（workers/experts/expertDirs + disabled 墓碑）、归一化、批量建立（逐项进度 + 建立/归档自愈双超时）、技能桥
+lib/expert-registry.js      V1.7 专家注册表：id 校验、原子写入（临时文件+rename）、自定义专家增删、删除墓碑
+lib/expert-manager.js       V1.7 专家管理中枢：改文件→重扫→原地更新清单→建/销 agent→注册委托；expertDir 解析
+src/client/core/expert-commands.js V1.7 语音命令规则解析（增删改查 + id 派生 + 播报文案，纯函数）
+src/client/core/controller.js V1.7 润色前拦截管理命令、执行 API、口头回报、热更新本地专家清单
 lib/skills.js               V1.4 专家技能：扫盘（内置/用户两层）、frontmatter 解析、**注册进 agent 作用域**、可用性自省
 lib/router.js               意图路由（两层第一层）：LLM 意图分类 + 任务改写；严格 JSON + 白名单 + general 兜底；V1.5 加「临床/生医/科研有实质内容必须派专家」规则
 lib/messages.js             identified message 工厂：优先官方 createUserMessage，兜底随机 id（坑十四）
-lib/delegation.js           V1.3 委托中枢：派单、结果捕获、LLM 汇总、同 worker 串行/不同 worker 并行、任务超时
+lib/delegation.js           V1.3 委托中枢：派单、结果捕获、LLM 汇总、同 worker 串行/不同 worker 并行、任务超时；V1.7 加 removeWorker
 lib/interactions.js         V1.4 互动中枢：旁听 session/event（审批/提问）、与汇报合流成一条按 at 排序的队列
 lib/interaction-kinds.js    互动类型常量（宿主与客户端共用；改一处不会漏另一处）
 lib/report.js               V1.3 汇报队列：严格单调游标、规则降级摘要、可朗读文案；V1.5 加 **`condenseArtifacts`（路径→「N 个文件，都在工作目录下」）**
@@ -1581,7 +1641,7 @@ lib/version.js              版本号唯一来源（health 引用；单测钉住
 assets/characters/          V1.6 六张 AI 生成 + 抠图的透明底 PNG（5 位专家 + 音球）
 lib/polish.js               转录润色（llm.stream）+ 跑偏检测 + 规则兜底
 lib/upstream.js             OpenAI 兼容 ASR/TTS 代理
-lib/routes.js               /health /config /polish /route /delegate /reports /interactions /asr /tts
+lib/routes.js               /health /config /polish /route /delegate /reports /interactions /asr /tts；V1.7 /experts 增删列
 skills/                     插件内置技能（随包发布，见 package.json 的 files）
 skills/somatic-mutation-report/SKILL.md  体细胞突变报告流程（小因·基因分析的技能）
 src/client/index.js         客户端入口：装配、快捷键、卸载

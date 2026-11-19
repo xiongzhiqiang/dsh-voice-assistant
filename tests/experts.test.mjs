@@ -276,7 +276,7 @@ check("未闭合的 frontmatter 不误切", splitFrontmatter("---\nname: a-b\n�
 	check("客户端能拿到专家描述", client.routing.workers.every((w) => typeof w.description === "string"), true);
 	check("客户端能拿到专家技能名", client.routing.workers.find((w) => w.id === "bioinfo").skills, ["somatic-mutation-report"]);
 	check("客户端配置不含技能正文", JSON.stringify(client).includes("AMP/ASCO/CAP"), false);
-	check("默认 5 位专家（含基因分析）", client.routing.workers.length, 5);
+	check("默认 4 位专家（通用/基因/病理/蛋白设计）", client.routing.workers.length, 4);
 	check("workerTargets 与 clientConfig 同形", workerTargets(cfg.routing.workers)[0].skills, []);
 }
 
@@ -550,8 +550,8 @@ check("汇报只需听结论", needsAction(REPORT_KIND), false);
 	// 目录语义是**追加**：丢一个文件不该让默认专家消失（否则用户一看
 	// "专家全没了"，跟"加了一位专家"的预期正相反）。
 	check("默认专家仍在（是新增不是替换）", cfg.routing.workers.some((w) => w.id === "bioinfo"), true);
-	check("默认五位一位不少", DEFAULT_WORKERS.every((d) => cfg.routing.workers.some((w) => w.id === d.id)), true);
-	check("总数 = 默认 5 + 新增 1", cfg.routing.workers.length, 6);
+	check("默认四位一位不少", DEFAULT_WORKERS.every((d) => cfg.routing.workers.some((w) => w.id === d.id)), true);
+	check("总数 = 默认 4 + 新增 1", cfg.routing.workers.length, 5);
 	check("旧写法单值 expertDir 也认", normalizeConfig({ routing: { expertDir: dir } }).routing.workers.some((w) => w.id === "mine"), true);
 	check("runtime 下发的 expertDirs 与归一化一致", normalizeConfig({ routing: { expertDirs: [dir] } }).routing.expertDirs, [dir]);
 	check("problems 为空（没有坏文件）", cfg.routing.problems, []);
@@ -566,7 +566,7 @@ check("汇报只需听结论", needsAction(REPORT_KIND), false);
 	check("覆盖后仍继承默认描述（模板打底）", bioinfo.description.length > 0, true);
 	check("覆盖后仍继承默认人格", bioinfo.persona.length > 0, true);
 	check("覆盖后仍继承默认技能", bioinfo.skills, ["somatic-mutation-report"]);
-	check("其余默认专家不受影响", cfg.routing.workers.length, 5);
+	check("其余默认专家不受影响", cfg.routing.workers.length, 4);
 }
 {
 	// 内联来源写了完整花名册时，目录只补新 id，**不盖**用户显式写的。

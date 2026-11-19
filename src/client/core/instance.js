@@ -196,6 +196,12 @@ export function setController(controller) {
 				return { engine: controller.getSnapshot().engine, ears: globalThis.__xfvDebug.ears() };
 			},
 
+			/**
+			 * V1.7：当前状态快照（只读）。供真浏览器探针验证"命令是否被识别"
+			 * —— routeVia / heard / lastReport 这些字段只在快照里，DOM 上不全有。
+			 */
+			snapshot: () => controller.getSnapshot(),
+
 			// ── 跨会话（需求 ②）─────────────────────────────────────────
 			//
 			// 这四条都是控制器公开方法的**透传**，不额外暴露内部结构：

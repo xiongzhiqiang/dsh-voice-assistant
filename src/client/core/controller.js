@@ -54,7 +54,11 @@ import { EchoGuard } from "./echo.js";
 import { QuestionBridge, matchAnswer, speakQuestion } from "./questions.js";
 import { playChime, unlockAudio } from "./chime.js";
 import { createPlaybackLedger, createSeqWatermark, withinCatchup } from "./ledger.js";
-import { polish, route, delegate, reports as fetchReports, interactions as fetchInteractions, log, warn } from "./runtime.js";
+import {
+	polish, route, delegate, reports as fetchReports, interactions as fetchInteractions,
+	listExperts, addExpert, removeExpert, log, warn,
+} from "./runtime.js";
+import { parseExpertCommand, formatCommandSpeech } from "./expert-commands.js";
 import { WebSpeechEngine, isAvailable as webSpeechAvailable } from "./engines/webspeech.js";
 import { HttpAsrEngine, isAvailable as httpAsrAvailable } from "./engines/http.js";
 import { makeEarsRecognizer, probeEars } from "./engines/ears.js";
@@ -1054,6 +1058,14 @@ export class VoiceController {
 		const generation = this.generation;
 		this.patch({ heard: raw, partial: raw, error: "" });
 
+		// V1.7：专家管理命令在**润色前**用规则识别（润色会把结构化命令改写成
+		// 自然语言，反而丢参数）。命中就执行并口头回报，不再走 LLM 路由。
+		const command = parseExpertCommand(raw);
+		if (command !== null) {
+			await this.runExpertManagement(command, generation);
+			return;
+		}
+
 		let text = raw;
 		let via = "off";
 		if (this.config.polish.enabled) {
@@ -1154,6 +1166,76 @@ export class VoiceController {
 		if (!accepted) {
 			this.fail(new Error("prompt-rejected"));
 		}
+	}
+
+	/**
+	 * V1.7：执行一条专家管理命令（增 / 删 / 列）并口头回报。
+	 *
+	 * 与正常指令不同：管理命令不写会话、不派单，执行完直接说话。走完整的
+	 * COMMAND → AGENT_MESSAGE → SPEAK_END 状态机，避免播完停在"思考中"。
+	 *
+	 * @param command - `parseExpertCommand()` 的结果。
+	 * @param generation - 进入时的代号，用于检测期间被打断。
+	 */
+	async runExpertManagement(command, generation) {
+		this.machine.send(EVENTS.COMMAND);
+		let result;
+		let speech;
+		try {
+			if (command.kind === "list") {
+				const data = await listExperts();
+				const names = (data?.workers ?? []).map((w) => w.label ?? w.id).join("、");
+				result = { ok: data?.ok === true, ...data };
+				speech = result.ok && names !== "" ? `现在的专家有：${names}。` : "现在没有可用专家。";
+				if (Array.isArray(data?.workers)) this.refreshExperts(data.workers);
+			} else if (command.kind === "add") {
+				result = await addExpert(command.expert);
+				speech = formatCommandSpeech(result, "add");
+				if (result?.ok === true) {
+					// 带上生成的 id，方便用户后续用名字删除。
+					speech += `它的编号是 ${result.expert.id}。`;
+					await this.syncExpertsAfterChange();
+				}
+			} else if (command.kind === "remove") {
+				result = await removeExpert(command.id);
+				speech = formatCommandSpeech(result, "remove");
+				if (result?.ok === true) await this.syncExpertsAfterChange();
+			}
+		} catch (error) {
+			warn("专家管理命令失败", error?.message ?? error);
+			result = { ok: false, error: String(error?.message ?? error) };
+			speech = formatCommandSpeech(result, command.kind);
+		}
+		if (generation !== this.generation) return;
+
+		this.notice(speech, result?.ok === true ? "info" : "warn");
+		this.patch({ lastReport: speech, answer: speech, routedWorker: "", routeVia: "expert-command" });
+		this.pushHistory("assistant", speech);
+		this.echoGuard.remember(speech);
+		try {
+			await this.speaker.speak(speech);
+		} catch (error) {
+			warn("管理命令播报失败", error?.message ?? error);
+		}
+		if (generation !== this.generation) return;
+		this.machine.send(EVENTS.SPEAK_END);
+		this.patch({ partial: "" });
+	}
+
+	/** 增删后重新拉清单，更新本地配置（卡通桌宠浮层据此增减）。 */
+	async syncExpertsAfterChange() {
+		try {
+			const data = await listExperts();
+			if (Array.isArray(data?.workers)) this.refreshExperts(data.workers);
+		} catch (error) {
+			warn("刷新专家清单失败", error?.message ?? error);
+		}
+	}
+
+	/** 原地替换本地专家清单（保住配置对象引用）。 */
+	refreshExperts(workers) {
+		if (!Array.isArray(this.config.routing?.workers)) return;
+		this.config.routing.workers.splice(0, this.config.routing.workers.length, ...workers);
 	}
 
 	/** ── 需求④ 统一互动流：按发生时间依次播报 ──────────────────────────

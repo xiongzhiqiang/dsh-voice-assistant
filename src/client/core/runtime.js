@@ -158,6 +158,39 @@ export async function delegate(worker, task) {
 }
 
 /**
+ * V1.7：列出专家（管理命令用）。
+ * @returns `{ ok, workers, custom, tombstones, problems, dir }`。
+ */
+export async function listExperts() {
+	const response = await request("/experts", { method: "GET" });
+	return response.json();
+}
+
+/**
+ * V1.7：新增一位专家。
+ * @param spec - `{ id?, label, description, persona?, skills? }`。
+ * @returns `{ ok, expert?, speech?, error? }`。
+ */
+export async function addExpert(spec) {
+	const response = await request("/experts", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(spec),
+	});
+	return response.json();
+}
+
+/**
+ * V1.7：删除一位专家（内置专家写墓碑）。
+ * @param id - 专家 id。
+ * @returns `{ ok, id?, mode?, speech?, error? }`。
+ */
+export async function removeExpert(id) {
+	const response = await request(`/experts/${encodeURIComponent(id)}`, { method: "DELETE" });
+	return response.json();
+}
+
+/**
  * V1.3：按 after 游标取回 worker 的完成要点（按完成时间升序）。
  * @param after - 毫秒时间戳，或 `"latest"`（首帧只取游标、不重放历史）。
  * @returns `{ reports: [{seq,at,label,summary,ok,speech,...}], cursor }`。
