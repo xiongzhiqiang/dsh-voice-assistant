@@ -4,6 +4,14 @@ import { projectActivities } from "../lib/activities.js";
 import { API_PREFIX as HOST_PREFIX } from "../lib/api-prefix.js";
 import { API_PREFIX as CLIENT_PREFIX } from "../src/client/core/constants.js";
 import { clampPosition, positionFromPointer, isDragGesture, positionStyle } from "../src/client/ui/drag.js";
+import {
+	EXPERT_SIZE,
+	DEFAULT_LAYOUT,
+	defaultExpertPosition,
+	isExpertVisible,
+	visibleExperts,
+	toggleMinimized,
+} from "../src/client/ui/expert-visual.js";
 import { clientConfig, normalizeConfig } from "../lib/config.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -37,7 +45,7 @@ check("未知 id 的 URL 也安全", avatarUrl("/api", "../secret"), "/api/avata
 // 打包清单必须含 assets/ —— 漏了它 junction 安装看不出问题、
 // 打包安装后所有图像全消失（V1.4 的 skills/ 就是这个坑）。
 check("files 清单含 assets/", pkg.files.includes("assets/"), true);
-check("版本号与 lib/version.js 一致", pkg.version, "1.8.0");
+check("版本号与 lib/version.js 一致", pkg.version, "1.9.0");
 
 // 六张素材必须都真实存在且带 alpha（抠过图），否则运行期会出白底方块。
 const ASSET_DIR = join(process.cwd(), "assets", "characters");
@@ -108,6 +116,38 @@ check(
 	positionStyle({ x: 280, y: 300 }),
 	{ position: "fixed", left: "280px", top: "300px", right: "auto", bottom: "auto", transform: "none" },
 );
+
+// ── V1.9 桌宠显隐/单个控制（纯函数）─────────────────────────────────
+const wBusy = { id: "bioinfo", busy: true };
+const wIdle = { id: "general", busy: false };
+check("空闲专家不显示", isExpertVisible(wIdle, []), false);
+check("在岗专家显示", isExpertVisible(wBusy, []), true);
+check("被单独最小化的在岗专家不显示", isExpertVisible(wBusy, ["bioinfo"]), false);
+check("其它专家最小化不影响本专家", isExpertVisible(wBusy, ["pathologist"]), true);
+check("空数据不显示", isExpertVisible(null, []), false);
+check("最小化集合用 Set 也支持", isExpertVisible(wBusy, new Set(["bioinfo"])), false);
+check("可见名单只含在岗且未最小化者",
+	visibleExperts([wIdle, wBusy, { id: "pathologist", busy: true }], ["pathologist"]).map((x) => x.worker.id),
+	["bioinfo"],
+);
+check("可见序号从 0 连续分配",
+	visibleExperts([wBusy, { id: "pathologist", busy: true }], []).map((x) => x.order),
+	[0, 1],
+);
+check("默认位置按序号向下错开",
+	[defaultExpertPosition(0), defaultExpertPosition(1), defaultExpertPosition(2)],
+	[{ x: 18, y: 96 }, { x: 18, y: 186 }, { x: 18, y: 276 }],
+);
+check("默认布局常量与位置一致", DEFAULT_LAYOUT.gap, 90);
+check("桌宠尺寸常量稳定", EXPERT_SIZE, { w: 64, h: 82 });
+check("最小化切换：加入", toggleMinimized([], "bioinfo"), ["bioinfo"]);
+check("最小化切换：再点移除", toggleMinimized(["bioinfo"], "bioinfo"), []);
+check("最小化切换：逐 id 独立", toggleMinimized(["bioinfo"], "pathologist"), ["bioinfo", "pathologist"]);
+check("最小化切换：不改原数组", (() => {
+	const original = ["bioinfo"];
+	toggleMinimized(original, "pathologist");
+	return original;
+})(), ["bioinfo"]);
 
 if (failures.length > 0) {
 	console.error(`\n${failures.length} 项失败：`);

@@ -117,35 +117,27 @@ const orbImg = await evaluate(`(() => {
 check("音球用了拟人形象 img", orbImg !== null && typeof orbImg.src === "string" && orbImg.src.includes("/avatars/orb.png"), JSON.stringify(orbImg));
 check("音球图片真的加载成功", orbImg !== null && orbImg.w > 0, JSON.stringify(orbImg));
 
-// 2. 专家桌宠层
+// 2. 专家桌宠层（V1.9：空闲时桌宠完全隐藏，只有 busy 的专家才冒出来）
 const experts = await evaluate(`(() => {
-  const layer = document.querySelector('[data-xfv="experts"]');
-  if (!layer) return null;
   const cards = [...document.querySelectorAll('.xfv-expert')];
   return JSON.stringify({
     count: cards.length,
     ids: cards.map(c => c.getAttribute('data-xfv')),
-    imgs: cards.map(c => { const i = c.querySelector('.xfv-expert-img'); return i ? { src: i.getAttribute('src'), w: i.naturalWidth } : null; }),
     busy: cards.map(c => c.getAttribute('data-busy')),
   });
 })()`);
-// V1.7：专家清单可变（默认 4 位 + 用户自定义 + disabled 墓碑），不再硬编码
-// 数量/id。从 /experts 拿当前花名册，断言浮层与之一一对应。
+// 从 /experts 拿花名册，供后面主动派单使用（V1.9 不再拿它断言桌宠数量）。
 const roster = await fetch("http://127.0.0.1:3080/plugins/dsh-voice-assistant/api/experts", {
 	headers: { cookie: `dsh_token=${JSON.parse((await import("node:fs")).readFileSync("tools/_dsh-serve.json", "utf8")).token}` },
 	signal: AbortSignal.timeout(3000),
 }).then((r) => r.json()).catch(() => null);
-const expectedIds = Array.isArray(roster?.workers) ? roster.workers.map((w) => `expert-${w.id}`) : null;
-check("专家桌宠层已挂载", experts !== null, JSON.stringify(experts));
-if (experts) {
-	check("专家数量与实际花名册一致", expectedIds === null || experts.count === expectedIds.length, `浮层 ${experts.count} / 花名册 ${expectedIds?.length}`);
-	check("专家 id 与实际花名册一致", expectedIds === null || experts.ids.slice().sort().join(",") === expectedIds.slice().sort().join(","), `浮层 ${experts.ids.join(",")} / 花名册 ${expectedIds?.join(",")}`);
-	const loaded = experts.imgs.filter((i) => i !== null && i.w > 0);
-	check("所有专家图都加载成功", loaded.length === experts.count, `${loaded.length}/${experts.count}: ${JSON.stringify(experts.imgs)}`);
-	// 不假设"全空闲"：上一次探针派的任务可能还在后台跑（跨探针状态污染）。
-	// 只断言工作态是合法值，真正的联动在下面主动派单后验证。
-	check("专家工作态字段合法", experts.busy.every((b) => b === "true" || b === "false"), experts.busy.join(","));
-}
+// V1.9 语义：页面上出现的桌宠必须都处于 busy；空闲专家不应有桌宠常驻。
+check("桌宠只在工作态出现（无空闲桌宠常驻）",
+	experts !== null && experts.busy.every((b) => b === "true"),
+	JSON.stringify(experts));
+check("当前桌宠数与工作态行一致（≤花名册）",
+	experts !== null && (roster?.workers == null || experts.count <= roster.workers.length),
+	`桌宠 ${experts?.count} / 花名册 ${roster?.workers?.length}`);
 
 // 3. 真实拖拽音球（CDP 派发指针事件）
 // 先装一个探针统计 pointer 事件，判断是"事件没到"还是"到了但逻辑没生效"。
@@ -226,11 +218,12 @@ const delegated = await fetch(`${apiBase}/delegate`, {
 	body: JSON.stringify({ worker: targetWorker, task: "请简要说明你的职责，一句话即可。" }),
 }).then((r) => r.json()).catch(() => null);
 check("派单成功（工作态联动前置）", delegated?.ok === true, JSON.stringify(delegated));
+const sel = `[data-xfv="expert-${targetWorker}"]`;
+// 桌宠 1.5s 轮询一次。任务可能在几秒内完成，所以要**持续轮询**抓 busy
+// 的那一瞬，而不是死等固定时长（否则任务跑完了反而看不到）。
+// 提升到外层作用域，供 V1.9 专项验证复用。
+let busyState = null;
 if (delegated?.ok === true) {
-	const sel = `[data-xfv="expert-${targetWorker}"]`;
-	// 桌宠 1.5s 轮询一次。任务可能在几秒内完成，所以要**持续轮询**抓 busy
-	// 的那一瞬，而不是死等固定时长（否则任务跑完了反而看不到）。
-	let busyState = null;
 	for (let i = 0; i < 16; i += 1) {
 		await sleep(500);
 		busyState = await evaluate(`(() => {
@@ -261,6 +254,49 @@ if (delegated?.ok === true) {
 	}
 }
 
+// 7. V1.9 三项需求专项验证（在桌宠已因派单出现的前提下）
+if (busyState?.busy === "true") {
+	const v19 = await evaluate(`(() => {
+	  const c = document.querySelector('[data-xfv="expert-${targetWorker}"]');
+	  if (!c) return null;
+	  const fig = c.querySelector('.xfv-expert-figure');
+	  const img = c.querySelector('.xfv-expert-img');
+	  const minBtn = c.querySelector('.xfv-expert-min');
+	  const cs = getComputedStyle(fig);
+	  return JSON.stringify({
+	    enter: c.getAttribute('data-enter'),
+	    bg: cs.backgroundColor,
+	    borderStyle: cs.borderStyle,
+	    imgSrc: img?.getAttribute('src') ?? '',
+	    imgNaturalW: img?.naturalWidth ?? 0,
+	    hasMinBtn: !!minBtn,
+	    minTitle: minBtn?.getAttribute('title') ?? '',
+	  });
+	})()`);
+	check("① 桌宠容器透明底（无背景色）",
+		v19 !== null && (v19.bg === "rgba(0, 0, 0, 0)" || v19.bg === "transparent"),
+		JSON.stringify(v19));
+	check("① 桌宠容器无边框卡片", v19 !== null && v19.borderStyle === "none", v19?.borderStyle);
+	check("① 素材图仍正常加载（透明 PNG）", v19 !== null && v19.imgNaturalW > 0, v19?.imgNaturalW);
+	check("② 桌宠带入场动画标记（滑入弹跳）", v19 !== null && v19.enter === "true", v19?.enter);
+	check("③ 每张桌宠自带独立最小化按钮", v19 !== null && v19.hasMinBtn === true, JSON.stringify(v19));
+
+	// ③ 点最小化按钮：这只桌宠消失，且不影响其它（逐 id 独立）。
+	const minRect = await evaluate(`(() => {
+	  const b = document.querySelector('[data-xfv="expert-min-${targetWorker}"]');
+	  if (!b) return null;
+	  const r = b.getBoundingClientRect();
+	  return JSON.stringify({ x: r.left + r.width/2, y: r.top + r.height/2 });
+	})()`);
+	if (minRect !== null) {
+		await send("Input.dispatchMouseEvent", { type: "mousePressed", x: minRect.x, y: minRect.y, button: "left", buttons: 1, clickCount: 1 });
+		await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: minRect.x, y: minRect.y, button: "left", buttons: 0, clickCount: 1 });
+		await sleep(300);
+		const afterMin = await evaluate(`JSON.stringify({ gone: document.querySelector('[data-xfv="expert-${targetWorker}"]') === null })`);
+		check("③ 最小化后该桌宠立即收起", afterMin?.gone === true, JSON.stringify(afterMin));
+	}
+}
+
 // 6. 无 JS 异常
 const relevant = errors.filter((e) => /xfv|voice|小凤|orb|expert/i.test(e));
 check("无插件相关 JS 异常", relevant.length === 0, relevant.slice(0, 3).join(" | "));
@@ -271,4 +307,4 @@ if (failures.length > 0) {
 	for (const f of failures) console.error(`  - ${f.name}: ${f.detail ?? ""}`);
 	process.exit(1);
 }
-console.log("\nV1.6 卡通形象真浏览器验证通过");
+console.log("\nV1.9 卡通桌宠（透明底/空闲隐藏/单个控制）+ 音球 真浏览器验证通过");

@@ -277,62 +277,52 @@ function css(accent) {
 .xfv-session-item .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .xfv-session-item .m { color: var(--xfv-sub); font-size: 11px; }
 
-/* ── 专家桌宠层（V1.6）──────────────────────────────────────────── */
+/* ── 专家桌宠层（V1.9：透明底 + 空闲隐藏 + 单个控制）──────────── */
+/*
+ * V1.9 关键变化：
+ *   - 整层不再有容器定位 / 竖排 row / 整组收起按钮。每张桌宠都是独立 fixed
+ *     浮层，位置由 React 内联样式给出（拖拽过用持久位置，否则按可见序号错开）。
+ *   - layer 只是个空壳（无样式/无尺寸），保留 data-xfv="experts" 供探针查询。
+ *   - 桌宠本体透明底：素材 PNG 自带 alpha，figure 不再刷白卡片背景/边框/阴影，
+ *     改用 drop-shadow 勾边，深浅背景下都能看清形象。
+ */
 .xfv-experts {
-	position: fixed;
-	left: 18px;
-	top: 92px;
-	z-index: 2147482900; /* 略低于语音球，避免盖住音球 */
-	display: flex;
-	flex-direction: column;
-	align-items: flex-start;
-	gap: 6px;
 	pointer-events: none;
 	font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
 	color: var(--xfv-ink, #171a21);
 }
-.xfv-experts-toggle {
-	pointer-events: auto;
-	width: 26px;
-	height: 26px;
-	border-radius: 8px;
-	border: 1px solid var(--xfv-border, rgba(16, 24, 40, 0.10));
-	background: var(--xfv-surface, rgba(255, 255, 255, 0.94));
-	box-shadow: 0 4px 12px rgba(16, 24, 40, 0.12);
-	cursor: pointer;
-	font-size: 13px;
-	line-height: 1;
-	color: var(--xfv-sub, #5b6472);
-}
-.xfv-experts-row { display: flex; flex-direction: column; gap: 8px; }
 
 .xfv-expert {
 	pointer-events: auto;
-	position: relative;
+	/* position/left/top 由内联样式给出（fixed + 视口绝对坐标），见 drag.js。 */
 	width: 64px;
 	cursor: grab;
 	touch-action: none; /* 触屏拖拽时不要滚页面 */
 	user-select: none;
 	-webkit-user-select: none;
+	/* 入场：从左侧滑入 + 轻微弹跳，只播一次（元素每次忙时重新挂载）。 */
+	animation: xfv-expert-enter 520ms cubic-bezier(0.22, 1.2, 0.36, 1) both;
 }
 .xfv-expert:active { cursor: grabbing; }
+@keyframes xfv-expert-enter {
+	0%   { opacity: 0; transform: translateX(-26px) scale(0.7); }
+	60%  { opacity: 1; transform: translateX(4px) scale(1.06); }
+	100% { opacity: 1; transform: translateX(0) scale(1); }
+}
 
+/* 透明底：figure 本身无背景/边框，靠 drop-shadow 让形象与背景分离。 */
 .xfv-expert-figure {
 	position: relative;
 	width: 64px;
 	height: 64px;
-	border-radius: 14px;
-	background: var(--xfv-surface, rgba(255, 255, 255, 0.9));
-	border: 1px solid var(--xfv-border, rgba(16, 24, 40, 0.10));
-	box-shadow: 0 5px 16px rgba(16, 24, 40, 0.14);
 	overflow: visible;
-	transition: transform 180ms ease, box-shadow 180ms ease;
+	filter: drop-shadow(0 3px 6px rgba(16, 24, 40, 0.34));
+	transition: filter 180ms ease;
 }
-.xfv-expert:hover .xfv-expert-figure { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(16, 24, 40, 0.2); }
+.xfv-expert:hover .xfv-expert-figure { filter: drop-shadow(0 5px 10px rgba(16, 24, 40, 0.46)); }
 .xfv-expert[data-busy="true"] .xfv-expert-figure {
 	animation: xfv-expert-work 1.6s ease-in-out infinite;
-	border-color: rgba(247, 144, 9, 0.6);
-	box-shadow: 0 5px 16px rgba(247, 144, 9, 0.28);
+	filter: drop-shadow(0 3px 8px rgba(247, 144, 9, 0.5));
 }
 @keyframes xfv-expert-work {
 	0%, 100% { transform: translateY(0) rotate(-1deg); }
@@ -358,23 +348,45 @@ function css(accent) {
 }
 .xfv-expert-status {
 	position: absolute;
-	right: -2px;
-	bottom: -2px;
+	right: 2px;
+	bottom: 2px;
 	width: 12px;
 	height: 12px;
 	border-radius: 50%;
-	border: 2px solid var(--xfv-surface, #fff);
+	border: 2px solid rgba(255, 255, 255, 0.9);
 	background: #12b76a;
+	box-shadow: 0 1px 3px rgba(16, 24, 40, 0.3);
 }
 .xfv-expert[data-busy="true"] .xfv-expert-status { background: #f79009; }
 .xfv-expert-name {
 	text-align: center;
 	font-size: 11px;
 	line-height: 1.3;
-	margin-top: 3px;
+	margin-top: 2px;
 	color: var(--xfv-sub, #5b6472);
-	text-shadow: 0 1px 2px rgba(255, 255, 255, 0.9);
+	text-shadow: 0 1px 3px rgba(255, 255, 255, 0.95), 0 1px 2px rgba(255, 255, 255, 0.9);
 }
+
+/* 单个桌宠的最小化按钮：浮在形象右上角，逐 id 独立控制。 */
+.xfv-expert-min {
+	position: absolute;
+	z-index: 2;
+	top: -5px;
+	right: -5px;
+	width: 20px;
+	height: 20px;
+	padding: 0;
+	border-radius: 50%;
+	border: 1px solid var(--xfv-border, rgba(16, 24, 40, 0.12));
+	background: var(--xfv-surface, rgba(255, 255, 255, 0.94));
+	box-shadow: 0 2px 6px rgba(16, 24, 40, 0.18);
+	color: var(--xfv-sub, #5b6472);
+	font-size: 12px;
+	line-height: 1;
+	cursor: pointer;
+}
+.xfv-expert-min:hover { border-color: var(--xfv-accent, #2f6bff); color: var(--xfv-accent, #2f6bff); }
+
 .xfv-expert-task {
 	position: absolute;
 	left: calc(100% + 8px);
@@ -389,17 +401,18 @@ function css(accent) {
 	line-height: 1.5;
 	color: var(--xfv-ink, #171a21);
 	word-break: break-word;
+	animation: xfv-fade 140ms ease-out;
 }
 .xfv-expert-task b { display: block; margin-bottom: 3px; color: #f79009; }
 
 @media (prefers-color-scheme: dark) {
-	.xfv-expert-figure, .xfv-expert-toggle, .xfv-expert-task { background: rgba(28, 32, 40, 0.94); }
-	.xfv-expert-name { color: #a4adbb; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8); }
+	.xfv-expert-task { background: rgba(28, 32, 40, 0.94); }
+	.xfv-expert-name { color: #a4adbb; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95), 0 1px 2px rgba(0, 0, 0, 0.8); }
 }
 
 /* 减少动效偏好：关掉所有动画，避免前庭不适 */
 @media (prefers-reduced-motion: reduce) {
-	.xfv-halo, .xfv-bubble, .xfv-orb-face, .xfv-expert-figure { animation: none; }
+	.xfv-halo, .xfv-bubble, .xfv-orb-face, .xfv-expert, .xfv-expert-figure { animation: none; }
 	.xfv-orb, .xfv-orb-face, .xfv-expert-figure { transition: none; }
 }
 `;
