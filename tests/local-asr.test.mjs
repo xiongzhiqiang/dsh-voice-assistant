@@ -182,4 +182,74 @@ await withFetch(
 	},
 );
 
+console.log("── 首帧引擎识别必须走内置 API（不能卡在 remote 抛 speech-unavailable）──");
+// 回归：V2.1 曾让 createEngine() 早于 speechVia 初始化，recognizer 构造时把
+// via=undefined 快照成 remote。探测异步改成 local 也没用 —— 说话时
+// speechNamespace(ctx) 取不到 → 抛 speech-unavailable，即使模型全部就绪。
+{
+	const hadFileReader = Object.hasOwn(globalThis, "FileReader");
+	const hadAudioContext = Object.hasOwn(globalThis, "AudioContext");
+	globalThis.FileReader = class {
+		readAsDataURL(blob) {
+			blob.arrayBuffer().then((buf) => {
+				this.result = `data:audio/wav;base64,${Buffer.from(buf).toString("base64")}`;
+				this.onload?.();
+			});
+		}
+	};
+	globalThis.AudioContext = class {
+		async decodeAudioData() {
+			return { sampleRate: 16000, length: 1600, numberOfChannels: 1, getChannelData: () => new Float32Array(1600) };
+		}
+		async close() {}
+	};
+	try {
+		await withFetch(
+			async (url) => {
+				if (String(url).includes("/asr/status")) {
+					return {
+						ok: true,
+						json: async () => ({
+							ok: true,
+							enabled: true,
+							sensevoice: { available: true, model: "SenseVoice Small int8", precision: "int8" },
+							whisper: { available: true, model: "small", language: "zh" },
+						}),
+					};
+				}
+				if (String(url).includes("/asr/local")) return { ok: true, json: async () => ({ ok: true, text: "你好", via: "local" }) };
+				return { ok: false, json: async () => ({}) };
+			},
+			async (calls) => {
+				const cfg = {
+					language: "zh-CN",
+					wake: {},
+					sleep: { idleTimeoutMs: 60000 },
+					asr: { engine: "sensevoice", httpReady: false, maxSegmentMs: 15000 },
+					tts: {}, polish: {}, session: {}, agent: {}, routing: {}, answers: {},
+					interactions: {}, memory: {}, turn: {}, ui: {}, capabilities: {},
+				};
+				const controller = new VoiceController({ ctx: {}, config: cfg });
+				check("首帧 speechVia 已就位（不早于 createEngine）", controller.speechVia, "local");
+				await controller.detectSpeech({ silent: true });
+				const blob = new Blob([new Uint8Array(3200)], { type: "audio/wav" });
+				let text = null;
+				let error = null;
+				try {
+					text = await controller.engine.recognize(blob);
+				} catch (caught) {
+					error = caught?.message ?? String(caught);
+				}
+				check("强制 SenseVoice 识别无异常（不再 speech-unavailable）", error, null);
+				check("识别结果来自内置 API", text, "你好");
+				check("实际请求了 /asr/local", calls.some((c) => String(c.url).includes("/asr/local")), true);
+				controller.dispose?.();
+			},
+		);
+	} finally {
+		if (!hadFileReader) delete globalThis.FileReader;
+		if (!hadAudioContext) delete globalThis.AudioContext;
+	}
+}
+
 report();

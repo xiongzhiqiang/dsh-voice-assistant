@@ -176,12 +176,23 @@ export async function probeSpeech(ctx) {
  *
  * @param ctx - 客户端 Cordis 上下文。
  * @param options - `{ language?, via? }`：`via:'local'` 走本项目内置实现，否则走官方 remote。
+ *   `language` / `via` 可以是值，也可以是**返回值的函数** —— 必须用函数的形式：
+ *   探测是异步的，构造引擎时 `speechVia` 还没初始化（见 controller 构造顺序），
+ *   快照成 `undefined`→remote 会让识别永久卡在 remote 分支抛 speech-unavailable。
  * @returns `(blob) => Promise<string>`。
  */
 export function makeSpeechRecognizer(ctx, options = {}) {
-	const language = typeof options.language === "string" && options.language !== "" ? options.language : "auto";
-	const via = options.via === "local" ? "local" : "remote";
+	const resolveLanguage = () =>
+		typeof options.language === "function"
+			? options.language()
+			: typeof options.language === "string" && options.language !== ""
+				? options.language
+				: "auto";
+	const resolveVia = () =>
+		typeof options.via === "function" ? options.via() : options.via === "local" ? "local" : "remote";
 	return async (blob) => {
+		const language = resolveLanguage();
+		const via = resolveVia();
 		// V2.1：内置链 —— 归一化 WAV 后 POST 给本插件 API，全程不依赖 remote.speech。
 		if (via === "local") {
 			let payload;

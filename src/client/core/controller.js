@@ -208,6 +208,18 @@ export class VoiceController {
 		// 毫秒里。再补一道文本级防线：识别到的话若就是助手刚说的，丢掉。
 		this.echoGuard = new EchoGuard();
 
+		/**
+		 * 内置识别的接线选择（`local` = 项目自有实现，`remote` = 旧插件兜底）。
+		 *
+		 * ⚠️ 必须在 `createEngine()` **之前**初始化：引擎里的 recognizer 会在
+		 * 识别时读这两个字段。曾在 V2.1 把它们放在构造函数末尾，首帧
+		 * `createEngine()` 时还是 undefined → recognizer 快照成 `remote`
+		 * → 即使探测异步改成 `local` 也不生效 → 说话时报 speech-unavailable。
+		 * 默认 `local`：V2.1 内置优先，remote 只在旧装配兜底时才用。
+		 */
+		this.earsVia = "local";
+		this.speechVia = "local";
+
 		this.engine = this.createEngine();
 		this.speaker = new Speaker({
 			getConfig: () => this.config,
@@ -325,8 +337,7 @@ export class VoiceController {
 		 * 前者可以试，后者不该再试。
 		 */
 		this.earsAvailable = null;
-		/** V2.1：`ears`（本地 Whisper）这次探测走的是项目内置实现还是旧 remote 兜底。 */
-		this.earsVia = "remote";
+		// `earsVia` 已在 createEngine() 之前初始化（见构造函数开头），此处不再重复赋值。
 		/**
 		 * dsh-ears 当前后端是否要求**浏览器归一化后的 16 kHz PCM16 WAV**。
 		 *
@@ -358,8 +369,7 @@ export class VoiceController {
 		 * 与 dsh-ears 同为可选依赖：探测失败就标不可用，不影响其它引擎。
 		 */
 		this.speechAvailable = null;
-		/** V2.1：`sensevoice` 这次探测走的是项目内置实现还是旧 remote 兜底。 */
-		this.speechVia = "remote";
+		// `speechVia` 已在 createEngine() 之前初始化（见构造函数开头），此处不再重复赋值。
 		this.speechLanguages = SPEECH_LANGUAGES.slice();
 		this.speechPaths = [];
 
@@ -763,7 +773,7 @@ export class VoiceController {
 			// dsh-ears 设置页换后端（例如从云端换成本地 Whisper）。
 			return new HttpAsrEngine({
 				...handlers(),
-				recognize: makeEarsRecognizer(this.ctx, { needsWav: () => this.earsNeedsWav, via: this.earsVia }),
+				recognize: makeEarsRecognizer(this.ctx, { needsWav: () => this.earsNeedsWav, via: () => this.earsVia }),
 			});
 		}
 		if (name === "sensevoice") {
@@ -771,7 +781,7 @@ export class VoiceController {
 			// 宿主侧 validateWave 只收 WAV，识别器内部会做归一化。
 			return new HttpAsrEngine({
 				...handlers(),
-				recognize: makeSpeechRecognizer(this.ctx, { language: this.asrPreference.language, via: this.speechVia }),
+				recognize: makeSpeechRecognizer(this.ctx, { language: () => this.asrPreference.language, via: () => this.speechVia }),
 			});
 		}
 		if (name === "http" || name === "http-fallback") return new HttpAsrEngine(handlers());

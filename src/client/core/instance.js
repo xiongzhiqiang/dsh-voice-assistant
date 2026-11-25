@@ -137,6 +137,36 @@ export function setController(controller) {
 			},
 			snapshot: () => controller.getSnapshot(),
 			/**
+			 * 用一段合成静音 WAV 走**当前引擎的实际识别链**，返回结果或异常。
+			 *
+			 * 为什么需要：`/asr/status` 与 `speech()/ears()` 只证明"模型/探测
+			 * 可用"，证明不了"说话时真的调到了内置 API"。V2.1 曾因构造时序
+			 * 把 recognizer 的 via 快照成 remote，探测字段全绿但一说话就抛
+			 * speech-unavailable —— 只有真喂一段音频才抓得住这种漂移。
+			 *
+			 * @param seconds - 静音时长（默认 1 秒）。
+			 * @returns `{ engine, via, ok, text?, error? }`，异常不外抛。
+			 */
+			feedAudio: async (seconds = 1) => {
+				const engineName = controller.getSnapshot().engine;
+				const via = engineName === "sensevoice" ? controller.speechVia : engineName === "ears" ? controller.earsVia : "-";
+				try {
+					const frames = Math.max(1, Math.round(16000 * (Number(seconds) > 0 ? Number(seconds) : 1)));
+					const wav = new Uint8Array(44 + frames * 2);
+					const view = new DataView(wav.buffer);
+					const ascii = (offset, text) => { for (let i = 0; i < text.length; i += 1) view.setUint8(offset + i, text.charCodeAt(i)); };
+					ascii(0, "RIFF"); view.setUint32(4, 36 + frames * 2, true); ascii(8, "WAVE");
+					ascii(12, "fmt "); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+					view.setUint16(22, 1, true); view.setUint32(24, 16000, true);
+					view.setUint32(28, 32000, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+					ascii(36, "data"); view.setUint32(40, frames * 2, true);
+					const text = await controller.engine.recognize(new Blob([wav], { type: "audio/wav" }));
+					return { engine: engineName, via, ok: true, text: text ?? "" };
+				} catch (error) {
+					return { engine: engineName, via, ok: false, error: error?.message ?? String(error) };
+				}
+			},
+			/**
 			 * 状态迁移轨迹（最近的 `旧>新:事件` 列表）。
 			 *
 			 * 判"播报期到底停在哪个状态"必须看它 —— 轮询快照会漏掉短促的

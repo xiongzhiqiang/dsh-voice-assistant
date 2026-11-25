@@ -348,12 +348,16 @@ export async function probeEars(ctx) {
  * @param ctx - 客户端 Cordis 上下文。
  * @param options - `{ needsWav?, via? }`：`via:'local'` 走本项目内置 Whisper；
  *   `needsWav` 返回"当前后端是否要 WAV"（用户可能中途换后端）。
+ *   `via` 可以是值，也可以是**返回值的函数** —— 探测异步、构造引擎时
+ *   `earsVia` 还没初始化，快照成 undefined→remote 会卡在 remote 分支。
  * @returns `(blob, language) => Promise<string>`。
  */
 export function makeEarsRecognizer(ctx, options = {}) {
 	const shouldConvert = options.needsWav ?? (() => false);
-	const via = options.via === "local" ? "local" : "remote";
+	const resolveVia = () =>
+		typeof options.via === "function" ? options.via() : options.via === "local" ? "local" : "remote";
 	return async (blob) => {
+		const via = resolveVia();
 		// V2.1 内置链：Whisper 只吃 16k 单声道 PCM16 WAV，必须归一化。
 		if (via === "local") {
 			let payload;
