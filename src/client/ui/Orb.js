@@ -26,6 +26,7 @@ import { getController } from "../core/instance.js";
 import { h, useStore } from "./dom.js";
 import { positionStyle } from "./drag.js";
 import { useDrag } from "./useDrag.js";
+import { engineOptions } from "../core/asr-preference.js";
 
 /** 长按判定时长（毫秒）。 */
 const LONG_PRESS_MS = 600;
@@ -408,6 +409,84 @@ function shortPath(cwd) {
 }
 
 /**
+ * 识别方式选择区（用户自主选引擎 / 语言）。
+ *
+ * ## 为什么是独立组件
+ *
+ * 与 `SessionsSection` 同理：这里有 `useState`，必须提成真正的组件，
+ * 由 `renderPanel` 用 `h(AsrSection, …)` 挂载。若在 renderPanel 里直接调
+ * 函数，面板开合会让 hook 数量变化 → React error #310 → 浮层崩、球消失。
+ *
+ * ## 即时切换
+ *
+ * `onChange` 直接调 `controller.selectAsr()` —— 它一次性完成"改偏好 +
+ * 落 localStorage + 换引擎 + 广播"，界面上的「识别」行会立刻跟着变。
+ * 不另存 React state：真相在 controller 的偏好里，state 只会漂移。
+ *
+ * @param props - `{ controller, snapshot }`。
+ */
+function AsrSection(props) {
+	const { controller, snapshot } = props;
+	const preference = controller.asrPreference ?? { engine: "auto", language: "auto", manual: false };
+	const options = engineOptions({
+		ears: controller.earsAvailable === true,
+		sensevoice: controller.speechAvailable === true,
+		http: controller.config.asr?.httpReady === true,
+	});
+	// 探测完成会 patch 一个 speechProbeAt，读它强制本组件随探测结果刷新。
+	void snapshot.speechProbeAt;
+
+	const currentEngine = preference.manual ? preference.engine : "auto";
+	const onEngine = React.useCallback(
+		(event) => {
+			controller.selectAsr(event.target.value);
+		},
+		[controller],
+	);
+	const onLanguage = React.useCallback(
+		(event) => {
+			controller.selectAsr("sensevoice", event.target.value);
+		},
+		[controller],
+	);
+
+	return h(
+		"div",
+		{ className: "xfv-asr-section" },
+		h(
+			"label",
+			{ className: "xfv-asr-row" },
+			h("span", { className: "xfv-asr-label" }, "识别方式"),
+			h(
+				"select",
+				{ className: "xfv-select", value: currentEngine, onChange: onEngine },
+				...options.map((option) =>
+					h(
+						"option",
+						{ key: option.value, value: option.value, disabled: option.available === false },
+						`${option.label}${option.available === false ? "（未检测到）" : ""}`,
+					),
+				),
+			),
+		),
+		currentEngine === "sensevoice"
+			? h(
+					"label",
+					{ className: "xfv-asr-row" },
+					h("span", { className: "xfv-asr-label" }, "识别语言"),
+					h(
+						"select",
+						{ className: "xfv-select", value: preference.language, onChange: onLanguage },
+						...(controller.speechLanguages ?? ["auto", "zh", "en", "yue", "ja", "ko"]).map((lang) =>
+							h("option", { key: lang, value: lang }, lang),
+						),
+					),
+				)
+			: null,
+	);
+}
+
+/**
  * 渲染设置/状态面板。
  * @param controller - 语音控制器。
  * @param snapshot - 当前快照。
@@ -446,6 +525,9 @@ function renderPanel(controller, snapshot, onClose) {
 		row("状态", snapshot.label),
 		row("唤醒词", `${controller.config.wake.word}${controller.config.wake.aliases.length > 0 ? `（含 ${controller.config.wake.aliases.length} 个同音）` : ""}`),
 		row("识别", engineLabel),
+		// 识别方式选择：用户可自主切换引擎 / SenseVoice 语言，即时生效并持久化。
+		// 以组件形式挂载（不是函数调用），否则 hook 数量随面板开合变化会打崩浮层。
+		h(AsrSection, { controller, snapshot }),
 		row("润色", polishLabel),
 		// 两层架构：路由开关 + 最近一次派给了哪位 worker 专家。
 		row(

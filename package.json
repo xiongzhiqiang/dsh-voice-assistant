@@ -1,6 +1,6 @@
 {
 	"name": "dsh-voice-assistant",
-	"version": "1.9.0",
+	"version": "2.0.0",
 	"description": "「小凤」always-on voice assistant for DeepSeek Harness: wake-word standby, speech transcription with LLM polish, voice-driven multi-turn session dialogue, spoken replies, and a 60s idle-sleep cycle that wakes on a chime or an incoming agent message.",
 	"type": "module",
 	"main": "index.js",
@@ -54,7 +54,7 @@
 	"scripts": {
 		"build": "node build.mjs",
 		"check": "node build.mjs --check",
-		"test": "node --test tests/host.test.mjs tests/experts.test.mjs tests/client-core.test.mjs tests/questions.test.mjs tests/visuals.test.mjs tests/expert-management.test.mjs tests/expert-sessions.test.mjs",
+		"test": "node --test tests/host.test.mjs tests/experts.test.mjs tests/client-core.test.mjs tests/questions.test.mjs tests/visuals.test.mjs tests/expert-management.test.mjs tests/expert-sessions.test.mjs tests/asr-preference.test.mjs",
 		"check:sessions": "node tools/check-session-integrity.mjs",
 		"verify": "node tools/check-session-integrity.mjs && node tools/smoke-host.mjs && node tools/smoke-agent-route.mjs",
 		"probe:ledger": "node tools/cdp-ledger-probe.mjs",
@@ -63,6 +63,7 @@
 		"probe:expert-http": "node tools/smoke-expert-http.mjs",
 		"probe:expert-cmd": "node tools/cdp-expert-cmd-probe.mjs",
 		"probe:sessions": "node tools/smoke-sessions-http.mjs",
-		"probe:session-cmd": "node tools/cdp-session-cmd-probe.mjs <url>"
+		"probe:session-cmd": "node tools/cdp-session-cmd-probe.mjs <url>",
+		"probe:asr-selector": "node tools/cdp-asr-selector-probe.mjs <url>"
 	}
 }

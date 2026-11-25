@@ -64,6 +64,8 @@ import { parseExpertCommand, formatCommandSpeech, parseSessionCommand, formatSes
 import { WebSpeechEngine, isAvailable as webSpeechAvailable } from "./engines/webspeech.js";
 import { HttpAsrEngine, isAvailable as httpAsrAvailable } from "./engines/http.js";
 import { makeEarsRecognizer, probeEars } from "./engines/ears.js";
+import { makeSpeechRecognizer, probeSpeech, SPEECH_LANGUAGES } from "./engines/speech.js";
+import { readPreference, writePreference, normalizePreference } from "./asr-preference.js";
 
 /** 通知在界面上停留的时长（毫秒）。 */
 const NOTICE_TTL_MS = 4200;
@@ -328,6 +330,28 @@ export class VoiceController {
 		this.earsPaths = [];
 		/** ctx 的能力清单（排障"取不到命名空间"到底是没口、还是服务没上来"）。 */
 		this.earsShape = null;
+
+		/**
+		 * DSH 官方 speech 识别（SenseVoice）的探测结论与语言清单。
+		 *
+		 * 与 dsh-ears 同为可选依赖：探测失败就标不可用，不影响其它引擎。
+		 */
+		this.speechAvailable = null;
+		this.speechLanguages = SPEECH_LANGUAGES.slice();
+		this.speechPaths = [];
+
+		/**
+		 * 用户在 UI 里选的 ASR 偏好（`{ engine, language, manual }`）。
+		 *
+		 * `manual=true` 表示用户明确选过 —— 这一选择**优先于配置文件**，
+		 * 刷新后从 localStorage 恢复。但"自动降级链"仍在：手动选的引擎若
+		 * 运行时失败，照样按死名单回退到其它可用引擎（见 fail()）。
+		 */
+		this.asrPreference = readPreference();
+		if (this.asrPreference.manual === true) {
+			// 用户选过 sensevoice 时语言一并带过来；其它引擎语言不影响。
+			this.config = { ...this.config, asr: { ...this.config.asr, engine: this.asrPreference.engine } };
+		}
 		/**
 		 * 是否处于"刚唤醒、还没听到第一句话"。
 		 *
@@ -356,6 +380,9 @@ export class VoiceController {
 		// 首探**极可能太早**（本插件 apply 早于 dsh-ears 挂服务，见 `watchEars`），
 		// 所以必须挂一条"服务就位就接上"的路，否则本地 Whisper 配了也用不上。
 		this.watchEars().catch((error) => warn("dsh-ears 就位等待异常", error?.message ?? error));
+		// 官方 speech 识别同理（仅当 auto / 用户选了 sensevoice 时探测）。
+		this.detectSpeech().catch((error) => warn("speech 探测异常", error?.message ?? error));
+		this.watchSpeech().catch((error) => warn("speech 就位等待异常", error?.message ?? error));
 	}
 
 	/** ── 对外只读状态 ─────────────────────────────────────────────── */
@@ -410,6 +437,11 @@ export class VoiceController {
 	 */
 	pickEngineName() {
 		const preferred = this.config.asr.engine;
+		if (preferred === "sensevoice") {
+			// 官方 SenseVoice 是可选依赖，可用性靠异步探测。首帧先标 sensevoice，
+			// 探测失败由 detectSpeech() 回退（同 ears 的处理）。
+			return "sensevoice";
+		}
 		if (preferred === "ears") return "ears";
 		if (preferred === "http") {
 			if (this.config.asr.httpReady && httpAsrAvailable()) return "http";
@@ -507,6 +539,104 @@ export class VoiceController {
 			return;
 		}
 		this.swapEngine("ears");
+	}
+
+	/**
+	 * 探测 DSH 官方 speech 识别（SenseVoice）。
+	 *
+	 * 与 dsh-ears 一样是可选依赖。职责边界：
+	 *   - 只记录可用性 / 语言清单，供 UI 展示与回退判定；
+	 *   - 仅当当前引擎是 `sensevoice` **且探测确认不可用**时，才回退到别的引擎；
+	 *   - 绝不主动把别的引擎顶掉（用户没选就不抢麦克风）。
+	 *
+	 * @param options - `{ silent? }`：为真时连失败提示也不发（重试路径用）。
+	 */
+	async detectSpeech(options = {}) {
+		if (this.disposed) return;
+		const preferred = this.config.asr.engine;
+		// 只有关心 sensevoice 时才需要探测：auto 也可以在浏览器识别挂掉后
+		// 把它当作候选，所以 auto 同样探。
+		if (preferred !== "auto" && preferred !== "sensevoice") return;
+
+		const probe = await probeSpeech(this.ctx);
+		if (this.disposed) return;
+		this.speechAvailable = probe.available === true;
+		if (Array.isArray(probe.languages) && probe.languages.length > 0) this.speechLanguages = probe.languages.slice();
+		this.speechPaths = Array.isArray(probe.paths) ? probe.paths : [];
+		// 广播一次，让设置面板的可用性标记 / 语言下拉刷新（纯字段变更不会重渲染）。
+		this.patch({ speechProbeAt: Date.now() });
+
+		if (!probe.available) {
+			if (this.snapshot.engine === "sensevoice") {
+				const candidates = ["ears", "http", "http-fallback", "webspeech", "webspeech-fallback"];
+				this.swapEngine(candidates.find((name) => this.engineUsable(name)) ?? "none");
+			}
+			if (preferred === "sensevoice" && options.silent !== true) {
+				const actual = this.snapshot.engine;
+				this.notice(
+					actual === "none"
+						? "没有检测到 DSH 官方语音识别（SenseVoice），且没有其它可用引擎。"
+						: `没有检测到 DSH 官方语音识别（SenseVoice），已退回「${this.engineLabel(actual)}」。`,
+					"warn",
+				);
+			}
+		}
+	}
+
+	/**
+	 * 等服务就位后再探一次 speech（与 watchEars 同样的时序竞争问题）。
+	 */
+	async watchSpeech() {
+		if (this.disposed) return;
+		const preferred = this.config.asr.engine;
+		if (preferred !== "auto" && preferred !== "sensevoice") return;
+		if (this.speechAvailable === true) return;
+
+		try {
+			await this.ctx?.inject?.(["remote.speech"], () => {
+				if (this.disposed || this.speechAvailable === true) return;
+				log("speech 识别服务已就位，重新探测");
+				this.detectSpeech({ silent: true }).catch((error) => warn("speech 重探异常", error?.message ?? error));
+			});
+		} catch (error) {
+			warn("等待 speech 服务就位失败（改用重试兜底）", error?.message ?? error);
+		}
+		for (let attempt = 0; attempt < 2; attempt += 1) {
+			if (this.disposed || this.speechAvailable === true) return;
+			await new Promise((resolve) => setTimeout(resolve, 1500));
+			if (this.disposed || this.speechAvailable === true) return;
+			await this.detectSpeech({ silent: true });
+		}
+	}
+
+	/**
+	 * 用户在 UI 里选择识别引擎 / 语言。**即时切换 + 持久化**。
+	 *
+	 * 这是 UI 选择器唯一应该调用的入口：它同时更新偏好、落盘、切引擎，
+	 * 保证"界面显示"与"实际生效"永远一致（分开做就会漂移）。
+	 *
+	 * @param engine - 引擎名（`auto` / `webspeech` / `ears` / `sensevoice` / `http`）。
+	 * @param language - SenseVoice 语言提示（可选）。
+	 * @returns 结果 `{ ok, engine, language, notice }`。
+	 */
+	selectAsr(engine, language) {
+		const next = normalizePreference({
+			engine,
+			language: language ?? this.asrPreference.language,
+			manual: true,
+		});
+		this.asrPreference = writePreference(next);
+		// 让 config 也反映用户选择，detectEars/detectSpeech 的 preferred 判据才对。
+		this.config = { ...this.config, asr: { ...this.config.asr, engine: next.engine } };
+
+		const target = this.pickEngineName();
+		this.swapEngine(target);
+		// 新引擎可能是异步探测的可选依赖，立刻补一次探测（silent：选择场景
+		// 不弹"没检测到"的警告，面板上的可用性标记已经足够表达）。
+		if (target === "ears") this.detectEars({ silent: true }).catch(() => {});
+		if (target === "sensevoice") this.detectSpeech({ silent: true }).catch(() => {});
+
+		return { ok: true, engine: target, language: this.asrPreference.language };
 	}
 
 	/**
@@ -608,6 +738,14 @@ export class VoiceController {
 			// `needsWav` 传函数而不是布尔值 —— 用户可能在会话中途去
 			// dsh-ears 设置页换后端（例如从云端换成本地 Whisper）。
 			return new HttpAsrEngine({ ...handlers(), recognize: makeEarsRecognizer(this.ctx, { needsWav: () => this.earsNeedsWav }) });
+		}
+		if (name === "sensevoice") {
+			// DSH 官方语音输入：remote `speech` → SenseVoice 本地识别。
+			// 宿主侧 validateWave 只收 WAV，识别器内部会做归一化。
+			return new HttpAsrEngine({
+				...handlers(),
+				recognize: makeSpeechRecognizer(this.ctx, { language: this.asrPreference.language }),
+			});
 		}
 		if (name === "http" || name === "http-fallback") return new HttpAsrEngine(handlers());
 		return new WebSpeechEngine(handlers());
@@ -2099,6 +2237,7 @@ export class VoiceController {
 				http: "上游转写",
 				"http-fallback": "上游转写（已降级）",
 				ears: "dsh-ears 转写",
+				sensevoice: "本地 SenseVoice（官方）",
 				none: "无可用引擎",
 			}[name] ?? name
 		);
@@ -2143,6 +2282,10 @@ export class VoiceController {
 			this.swapEngine("ears");
 			return true;
 		}
+		if (this.speechAvailable && !this.deadEngines.has("sensevoice")) {
+			this.swapEngine("sensevoice");
+			return true;
+		}
 		for (const name of ["http", "http-fallback", "webspeech", "webspeech-fallback"]) {
 			if (this.deadEngines.has(this.engineFamily(name))) continue;
 			if (!this.engineUsable(name)) continue;
@@ -2162,6 +2305,7 @@ export class VoiceController {
 		if (name === "webspeech" || name === "webspeech-fallback") return webSpeechAvailable();
 		if (name === "http" || name === "http-fallback") return this.config.asr.httpReady && httpAsrAvailable();
 		if (name === "ears") return this.earsAvailable === true;
+		if (name === "sensevoice") return this.speechAvailable === true;
 		return false;
 	}
 

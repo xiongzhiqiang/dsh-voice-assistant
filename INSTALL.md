@@ -1,6 +1,6 @@
 # 「小凤」语音助手 —— 安装与使用说明
 
-> 适用版本：**V1.9.0**（桌宠透明底 + 空闲隐藏 + 单个控制；V1.8 为专家与会话解耦 + 分层记忆）
+> 适用版本：**V2.0.0**（接入官方 SenseVoice 识别 + UI 自主选择识别方式/语言）
 > 项目：`dsh-voice-assistant` —— 一个 DeepSeek Harness（DSH）bundle 插件。
 
 它把 DSH 从「打字对话」变成「对着电脑说话」：**常驻待机 → 喊「小凤」唤醒 →
@@ -211,7 +211,7 @@ npm run probe:session-cmd -- "<带 token 的 URL>"   # 语音会话命令
 # 1) 取 token（按 mtime 取最新日志里的 token）
 # 2) GET /?token=xxx → 303 + Set-Cookie
 # 3) 带 cookie 访问：/plugins/dsh-voice-assistant/api/health
-#    期望：HTTP 200、version=1.9.0、ok=true、problems=[]
+#    期望：HTTP 200、version=2.0.0、ok=true、problems=[]
 ```
 
 ---
@@ -257,15 +257,38 @@ tests/  tools/               单测 / 冒烟探针 / 会话自检工具
 | 后端 | 说明 |
 |---|---|
 | 浏览器 Web Speech | 零配置，依赖境外云端 |
-| `dsh-ears` 插件 | DSH 生态成熟输入插件，8 个后端（本地 Whisper / 阿里云 / 腾讯云 / Groq 等） |
+| `dsh-ears` 插件 | DSH 生态成熟输入插件，8 个后端（本地 Whisper / 阿里云 / 腾讯云 / Groq 等）；本机已切到 Whisper `small`（465MB） |
+| DSH 官方 SenseVoice（V2.0） | 官方 `voice-input-bundle` 的本地识别：SenseVoice Small（sherpa-onnx ONNX，INT8 228MB，已下载）+ Silero VAD；支持 auto/zh/en/粤/ja/ko |
 | `http` 自建端点 | 任意 OpenAI 兼容 `/audio/transcriptions`，在 `asr.http` 配置 baseURL/apiKey/model |
 
-> 本机实测：本地 Whisper 的 `ggml-tiny.bin`（最小档）把中文短片段识别成英文/西语并
-> 产生幻觉，质量明显不如浏览器识别，因此当前基线只走浏览器 Web Speech。要不要加
-> `dsh-ears` 兜底，请按各自网络与识别质量实测决定。
+### 8.1 在 UI 里选识别方式（V2.0）
+
+**长按语音球（或右键）打开设置面板 → 「识别方式」下拉**，即可自主切换：
+`自动` / `浏览器识别` / `本地 Whisper（dsh-ears）` / `本地 SenseVoice（官方）` / `上游转写`。
+没探测到的引擎会标「（未检测到）」且不可选。选中 SenseVoice 后会多出「识别语言」下拉
+（auto / zh / en / yue / ja / ko）。
+
+- **即时生效**：选中即切引擎，不用改配置、不用重启。
+- **刷新保留**：选择存在浏览器 `localStorage`（key `xfv:v1:asr-preference`），覆盖
+  `cordis.patch.yml` 的 `asr.engine`。想回到配置文件的值，选「自动」即可。
+- **仍有降级**：手动选的引擎运行时失败（如网络不通）照样自动回退到其它可用引擎。
+- 官方 SenseVoice 需要 `voice-input-bundle` 在 profile 里启用（默认已启用）。
+
+> **当前配置（2026-11-25）**：识别基线是浏览器 Web Speech，`dsh-ears` 本地 Whisper
+> 作为**离线兜底**已启用。网络好时用浏览器识别；网络不通时插件自动降级到本地
+> Whisper（本会话内不切回，避免抖动横跳）。兜底已钉死 `language: zh` 以压制
+> 短片段的语言误判幻觉。
+>
+> 模型档位（2026-11-25 升级）：已切到 **`small`（465MB）**，`ggml-tiny.bin`（74MB）
+> 保留作回退。配置在 `~/.dsh/profiles/web/cordis.patch.yml` 的
+> `recognition.localWhisper.model: small`，模型文件在 `%LOCALAPPDATA%\dsh-ears\whisper\`。
+> 模型带 dsh-ears 的 SHA256 校验 + `.dsh-ears-done` 标记，手动拷贝的文件若校验不过
+> 会被判为未下载。验证：`node tools/probe-local-whisper.mjs`（应显示 small 校验通过）。
+> 若要彻底回到"只走浏览器"，把 `~/.dsh/profiles/web/package.json` 的 bundles 去掉
+> `dsh-ears`、并把 `cordis.patch.yml` 里 dsh-ears 段注释掉，再重启 DSH。
 
 ---
 
 ## 9. 版本
 
-`1.9.0` · MIT License · 详细变更与历史踩坑见 [README.md](./README.md)。
+`2.0.0` · MIT License · 详细变更与历史踩坑见 [README.md](./README.md)。

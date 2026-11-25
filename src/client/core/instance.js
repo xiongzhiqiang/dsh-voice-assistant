@@ -179,8 +179,24 @@ export function setController(controller) {
 				// 各条取法的命中情况：命名空间取不到时靠它定位方向。
 				paths: controller.earsPaths ?? [],
 				// ctx 有没有那几个口：区分"没这个方法"与"服务还没注册上来"。
-				shape: controller.earsShape ?? null,
-			}),
+			shape: controller.earsShape ?? null,
+		}),
+		/**
+		 * DSH 官方 speech 识别（SenseVoice）的探测结论（只读，供真机断言）。
+		 *
+		 * 与 `ears()` 同一思路：把可用性、语言清单、命名空间各取法的命中
+		 * 情况摊开，才能区分"没装 bundle"与"装了但注册名不同 / 取太早"。
+		 */
+		speech: () => ({
+			available: controller.speechAvailable === true,
+			languages: Array.isArray(controller.speechLanguages) ? controller.speechLanguages.slice() : [],
+			paths: Array.isArray(controller.speechPaths) ? controller.speechPaths : [],
+		}),
+		/** 当前 ASR 偏好与生效引擎（真机验证 UI 选择持久化用）。 */
+		asr: () => ({
+			preference: controller.asrPreference ?? null,
+			engine: controller.getSnapshot().engine,
+		}),
 			/**
 			 * 再探一次 dsh-ears（排障"时序竞争"用）。
 			 *

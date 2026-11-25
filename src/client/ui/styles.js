@@ -201,6 +201,37 @@ function css(accent) {
 .xfv-row .k { color: var(--xfv-sub); }
 .xfv-row .v { text-align: right; word-break: break-all; }
 
+/* 识别方式 / 语言选择（V2.0）：紧凑一行，标签左、下拉右。 */
+.xfv-asr-section {
+\tpointer-events: auto;
+\tdisplay: flex;
+\tflex-direction: column;
+\tgap: 4px;
+\tpadding: 4px 0 6px;
+}
+.xfv-asr-row {
+\tdisplay: flex;
+\talign-items: center;
+\tjustify-content: space-between;
+\tgap: 10px;
+}
+.xfv-asr-label { color: var(--xfv-sub); white-space: nowrap; }
+.xfv-select {
+\tpointer-events: auto;
+\tflex: 1;
+\tmin-width: 0;
+\tmax-width: 170px;
+\tborder: 1px solid var(--xfv-border);
+\tbackground: var(--xfv-surface);
+\tcolor: var(--xfv-ink);
+\tborder-radius: 8px;
+\tpadding: 4px 6px;
+\tfont-size: 12px;
+\tcursor: pointer;
+\tfont-family: inherit;
+}
+.xfv-select:hover { border-color: var(--xfv-accent); }
+
 .xfv-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
 .xfv-btn {
 	pointer-events: auto;

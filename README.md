@@ -7,10 +7,42 @@
 一个 DSH bundle 插件：宿主半（配置 / 润色 / 路由 / worker 专家 / **专家技能** /
 **委托中枢** / **互动中枢** / 语音代理）+ 客户端半（浮层 / 状态机 / 唤醒 / 播报）。
 
-版本：`1.9.0`（V1.9 = 桌宠透明底 + 空闲隐藏 + 单个控制）。
+版本：`2.0.0`（V2.0 = 接入官方 SenseVoice 识别 + UI 自主选择识别方式/语言）。
 
 > **新用户请先看 [INSTALL.md](./INSTALL.md)** —— 独立的安装与使用说明（前置要求、
 > 安装、配置、语音/专家/会话命令、验证、卸载、识别后端）。本 README 偏设计原理与历史踩坑。
+
+## V2.0 的识别升级：接入官方 SenseVoice + UI 自主选择
+
+V2.0 做了两件事：把 DSH 官方 `voice-input-bundle` 的识别能力接进来，并在设置面板
+里让用户自己选识别方式和语言（此前只能在 `cordis.patch.yml` 里改 `asr.engine`）。
+
+**① 官方 SenseVoice 是什么**（调研结论，证据在 DSH 安装缓存的 bundle 包里）：
+- 一个装配包（本身 194KB），拉起 4 个子插件：`speech-to-text`（注册表）+
+  `speech-to-text-sensevoice`（本地推理）+ `api-speech-to-text`（remote 入口）+
+  `client-ui-voice-input`（官方录音 UI）。
+- 引擎：**本地 SenseVoice Small**，走 `sherpa-onnx-node 1.13.8` 做 ONNX CPU 推理，
+  配 Silero VAD 切句。不是 Whisper、也不调云端。
+- 模型：SenseVoice 多语种（zh/en/粤/ja/ko）2024-07-17 版，默认 **INT8 228MB**，
+  已随 bundle 下载在本机 `~/.dsh/speech-to-text/sensevoice/`；另有 FP32 894MB 可选。
+- 接口：remote namespace `speech`，`speech/transcribe({audioBase64, language})`
+  → `{text, audioSeconds, inferenceSeconds}`，另有 catalog/configure/prepare 等。
+- 宿主侧 `validateWave()` 只收 16k 单声道 PCM16 WAV —— 本插件已在识别器里做归一化。
+
+**② 接入方式**：与 dsh-ears 同一套模式 —— `src/client/core/engines/speech.js` 用
+服务全名 `ctx.get("remote.speech")` 取命名空间（多候选容错，不写进 inject），
+`HttpAsrEngine` + `makeSpeechRecognizer()` 转发，`controller` 的 `sensevoice` 引擎
+纳入死名单降级链。可选依赖：探测失败静默跳过，不影响其它引擎。
+
+**③ UI 自主选择**：设置面板（长按球 / 右键球）新增「识别方式」下拉：
+自动 / 浏览器识别 / 本地 Whisper（dsh-ears）/ 本地 SenseVoice（官方）/ 上游转写，
+未探测到的引擎标「（未检测到）」且不可选。选中 SenseVoice 时多出「识别语言」下拉
+（auto/zh/en/yue/ja/ko）。**即时切换 + localStorage 持久化**（`xfv:v1:asr-preference`），
+用户选择覆盖 `cordis.patch.yml` 的 `asr.engine`，刷新后仍保留。自动降级链仍在：
+手动选的引擎运行时失败照样回退。
+
+> 未探测到智能体时下拉为何禁用：`speechAvailable` / `earsAvailable` 是异步探测出的，
+> 面板上如实标记，避免用户选了才发现用不了。
 
 ## V1.9 的桌宠改版：透明底 + 空闲隐藏 + 单个控制
 
@@ -522,6 +554,22 @@ DSH 直接起不来）：
 > 回滚前的配置备份在 profile 目录：`package.json.bak-before-webspeech-rollback` /
 > `cordis.patch.yml.bak-before-webspeech-rollback`。想恢复 dsh-ears 兜底时，
 > 把这两份拷回去并重启 DSH 即可（恢复后见坑九/坑十的 WAV 格式与语言钉死说明）。
+
+**当前状态（2026-11-25 再次恢复 dsh-ears 作为离线兜底）**：应需求"没网/网络不稳
+时切本地 Whisper"，已把 `dsh-ears` 重新加回 bundle、取消 patch 注释并**钉死
+`localWhisper.language: zh`**。识别基线**仍是浏览器 Web Speech**（插件
+`asr.engine: auto` 优先选它）；只有网络不通（`asr-unreachable` → 死名单）时才
+自动降级到 dsh-ears 的本地 Whisper，且本会话内不切回，避免网络抖动来回横跳。
+改动前的配置已备份为 `*.bak-before-ears-restore-2026-11-25`。
+现状探针结论：`remote.dshEars` 已挂载、`local-whisper` 后端 `available=true`、
+`needsWav=true`，当前引擎 `webspeech`（auto 优先）——兜底链完整就位。
+模型档位（同日升级）：已从 `tiny`（74MB，6 档最弱）升到 **`small`（465MB）**，
+`ggml-tiny.bin` 保留作回退。配置在 patch 的 `recognition.localWhisper.model: small`；
+模型文件带 dsh-ears 的 SHA256 + `.dsh-ears-done` 完成标记（手动拷贝未校验的会判未下载）。
+升级路径（供其他机器复用）：从 huggingface `ggerganov/whisper.cpp` 下 `ggml-small.bin`，
+核对 size=487601967、sha256=1be3a9b2...（manifest 值），写完成标记 JSON
+`{"version":1,"model":"small","sha256":"<sha>","bytes":487601967}`，再重启 DSH。
+验证：`node tools/probe-local-whisper.mjs` 应显示 small 校验通过 + 原生加载 `type=3 (small)`。
 
 验收顺序（回滚后用这条，由内向外、每层独立可判）：
 
@@ -1465,6 +1513,10 @@ Chrome 的 `--use-fake-device-for-media-stream` **不是静音**，它循环播�
 | 且 `localWhisper.language` 默认**空**（自动检测） | `DEFAULT_RECOGNITION_SETTINGS` |
 
 ⇒ 浏览器识别**永远拿不到麦克风**，识别质量被钉死在最弱那一档。
+
+> **现状注记（2026-11-25）**：上表两处成因均已消除——`auto` 分支现在是浏览器
+> 识别优先（dsh-ears 只在网络失败时兜底），模型已升到 `small`、语言钉死 `zh`。
+> 上表保留为历史事故取证用，勿当作当前配置。
 
 **症状指纹（怎么认出来是它）**：Whisper 专有幻觉标记与语言误判 ——
 `[Subscribe]`、`[Spanish]`、`[BLANK_AUDIO]`、`（滋滋声）`、`（音乐）`、`（咳嗽）`、
