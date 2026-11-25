@@ -218,41 +218,46 @@ check("未闭合的 frontmatter 不误切", splitFrontmatter("---\nname: a-b\n�
 	check("描述不含换行", /\n/.test(skill?.description ?? ""), false);
 }
 
-// ── mergeWorkerSources：多来源合并 + 坏文件不连坐 ───────────────────────
+// ── mergeWorkerSources：目录唯一真相源 + 坏文件不连坐 ────────────────────
 {
 	const dir = tempDir("xfv-exp-");
-	writeFileSync(join(dir, "chem.json"), JSON.stringify({ id: "chem", label: "小化 · 化学", description: "分子建模。" }), "utf8");
+	writeFileSync(join(dir, "chem.json"), JSON.stringify({ id: "chem", label: "小化 · 化学", description: "分子建模。", skills: ["somatic-mutation-report"] }), "utf8");
 	writeFileSync(join(dir, "broken.json"), "{ 这不是 JSON", "utf8");
 	writeFileSync(join(dir, "no-id.json"), JSON.stringify({ label: "缺 id" }), "utf8");
 	writeFileSync(join(dir, "ignored.txt"), "不是 json", "utf8");
 
+	// V2.2：目录可用时，内联 workers/experts 一律不参与 —— 单一数据源，
+	// 不再有"YAML 里还活着、目录里已删"的双源漂移。
 	const merged = mergeWorkerSources(
 		[{ id: "coder", label: "我的码神" }],
 		[{ id: "bioinfo", label: "我的小因" }, { id: "coder", label: "应被高优先级盖住" }],
 		[dir],
 		"",
 	);
-	check("三个来源都进 items", merged.items.map((item) => item.id).sort(), ["bioinfo", "chem", "coder"]);
-	check("routing.workers 优先于 routing.experts", merged.items.find((i) => i.id === "coder").label, "我的码神");
+	check("目录可用时只认目录 JSON", merged.items.map((item) => item.id), ["chem"]);
+	check("内联 workers 不参与花名册", merged.items.some((i) => i.id === "coder"), false);
+	check("内联 experts 不参与花名册", merged.items.some((i) => i.id === "bioinfo"), false);
 	check("目录里的专家被读进来", merged.items.find((i) => i.id === "chem").label, "小化 · 化学");
 	check("坏 JSON 被跳过并记入 problems", merged.problems.filter((p) => p.includes("broken.json")).length, 1);
 	check("缺 id 被跳过并记入 problems", merged.problems.filter((p) => p.includes("no-id.json")).length, 1);
 	check("非 json 文件不当专家", merged.items.some((i) => i.id === "ignored"), false);
-	// 目录不存在：记一条 problem、不当专家，但**默认清单照旧**（append 语义）。
+	// 目录不存在（ENOENT）是正常初始态：不记假红 problem，items 为空由
+	// normalizeWorkers 补 general —— 不再铺任何内置领域专家。
 	const goneDir = mergeWorkerSources([], [], [join(dir, "nope")], "");
-	check("目录不存在记入 problems", goneDir.problems.length, 1);
-	check("目录不存在时铺默认清单（不是空花名册）", goneDir.items.map((i) => i.id), DEFAULT_WORKERS.map((w) => w.id));
+	check("目录不存在不记 problems", goneDir.problems.length, 0);
+	check("目录不存在时 items 为空（不再铺内置专家）", goneDir.items.map((i) => i.id), []);
+	check("目录不存在时补 general 锚点", normalizeWorkers(goneDir.items, "session-voice-assistant-root").map((i) => i.id), ["general"]);
 
-	// 合并结果能直接喂给 normalizeWorkers，并且**继承默认技能**（同 id 覆盖时
-	// 只改 label 不该把技能弄丢 —— 否则用户改个名字专家就"不会那个技能了"）。
+	// 目录 JSON 是完整定义：不存在"与默认模板合并 / 继承默认人格"。
 	const workers = normalizeWorkers(merged.items, "session-voice-assistant-root");
-	const bioinfo = workers.find((w) => w.id === "bioinfo");
-	check("同 id 覆盖时继承默认人格（未被清空）", (bioinfo.persona ?? "").length > 0, true);
-	check("同 id 覆盖时默认技能仍在", bioinfo.skills, ["somatic-mutation-report"]);
-	check("覆盖 label 生效", bioinfo.label, "我的小因");
-	check("目录新增的专家无技能", workers.find((w) => w.id === "chem").skills, []);
+	const chem = workers.find((w) => w.id === "chem");
+	check("目录专家带展示名", chem.label, "小化 · 化学");
+	check("目录专家声明的技能被保留", chem.skills, ["somatic-mutation-report"]);
+	check("目录专家有兜底 sessionId", chem.sessionId, "session-voice-worker-chem");
+	check("general 恒在首位且不带技能", workers[0].skills, []);
 
-	// 技能名归一化：去空、去重、去空白。
+	// 技能名归一化：去空、去重、去空白（内联来源在目录未配时仍可用，顺带守住
+	// 旧配置路径）。
 	//
 	// 注意**不按文法过滤**非法名（`Bad_Name` 会留在清单里）：这样
 	// `describeExpertSkills` 能把它报成 `missing`，用户在 health 里看得见
@@ -271,13 +276,19 @@ check("未闭合的 frontmatter 不误切", splitFrontmatter("---\nname: a-b\n�
 
 // ── 配置下发：能力名要给，正文不给 ─────────────────────────────────────
 {
-	const cfg = normalizeConfig(undefined);
+	const dir = tempDir("xfv-client-exp-");
+	writeFileSync(join(dir, "chem.json"), JSON.stringify({
+		id: "chem", label: "小化 · 化学", description: "分子建模。",
+		persona: "你是小化。", skills: ["somatic-mutation-report"],
+	}), "utf8");
+	const cfg = normalizeConfig({ routing: { expertDirs: [dir] } });
 	const client = clientConfig(cfg, {});
 	check("客户端能拿到专家描述", client.routing.workers.every((w) => typeof w.description === "string"), true);
-	check("客户端能拿到专家技能名", client.routing.workers.find((w) => w.id === "bioinfo").skills, ["somatic-mutation-report"]);
+	check("客户端能拿到专家技能名", client.routing.workers.find((w) => w.id === "chem").skills, ["somatic-mutation-report"]);
 	check("客户端配置不含技能正文", JSON.stringify(client).includes("AMP/ASCO/CAP"), false);
-	check("默认 4 位专家（通用/基因/病理/蛋白设计）", client.routing.workers.length, 4);
+	check("花名册 = general 锚点 + 1 位目录专家", client.routing.workers.map((w) => w.id), ["general", "chem"]);
 	check("workerTargets 与 clientConfig 同形", workerTargets(cfg.routing.workers)[0].skills, []);
+	check("未配目录时只下发 general", clientConfig(normalizeConfig(undefined), {}).routing.workers.map((w) => w.id), ["general"]);
 }
 
 // ── 互动队列：严格单调 at（按时间先后呈现的地基）───────────────────────
@@ -390,7 +401,10 @@ check("未闭合的 frontmatter 不误切", splitFrontmatter("---\nname: a-b\n�
 		};
 	};
 
-	const config = normalizeConfig({ routing: { enabled: true } });
+	// V2.2：专家来自目录 JSON，这里显式造一位 bioinfo 供互动中枢监听测试。
+	const hubDir = tempDir("xfv-hub-exp-");
+	writeFileSync(join(hubDir, "bioinfo.json"), JSON.stringify({ id: "bioinfo", label: "小因 · 基因分析", description: "基因分析" }), "utf8");
+	const config = normalizeConfig({ routing: { enabled: true, expertDirs: [hubDir] } });
 	const ctx = makeCtx();
 	const hub = createInteractionHub(ctx, config);
 	const rootSession = { id: config.agent.sessionId };
@@ -539,7 +553,7 @@ check("审批需要用户去界面处理", needsAction(APPROVAL_KIND), true);
 check("提问需要用户去界面处理", needsAction(QUESTION_KIND), true);
 check("汇报只需听结论", needsAction(REPORT_KIND), false);
 
-// ── 用户自定义专家目录入口（需求①的"用户自行添加"）────────────────────
+// ── 用户自定义专家目录入口（V2.2：唯一真相源）────────────────────────────
 {
 	const dir = tempDir("xfv-user-exp-");
 	writeFileSync(join(dir, "my-expert.json"), JSON.stringify({ id: "mine", label: "我的专家", description: "干我的事。", skills: [] }), "utf8");
@@ -547,37 +561,37 @@ check("汇报只需听结论", needsAction(REPORT_KIND), false);
 	check("目录里新加一位专家即生效", cfg.routing.workers.some((w) => w.id === "mine"), true);
 	check("新专家带上展示名", cfg.routing.workers.find((w) => w.id === "mine").label, "我的专家");
 	check("新专家有兜底 sessionId", cfg.routing.workers.find((w) => w.id === "mine").sessionId, "session-voice-worker-mine");
-	// 目录语义是**追加**：丢一个文件不该让默认专家消失（否则用户一看
-	// "专家全没了"，跟"加了一位专家"的预期正相反）。
-	check("默认专家仍在（是新增不是替换）", cfg.routing.workers.some((w) => w.id === "bioinfo"), true);
-	check("默认四位一位不少", DEFAULT_WORKERS.every((d) => cfg.routing.workers.some((w) => w.id === d.id)), true);
-	check("总数 = 默认 4 + 新增 1", cfg.routing.workers.length, 5);
+	// V2.2：代码里不再内置任何领域专家，花名册 = general 锚点 + 目录 JSON。
+	check("不再有内置领域专家 bioinfo", cfg.routing.workers.some((w) => w.id === "bioinfo"), false);
+	check("总数 = general 锚点 + 目录 1 位", cfg.routing.workers.length, 2);
 	check("旧写法单值 expertDir 也认", normalizeConfig({ routing: { expertDir: dir } }).routing.workers.some((w) => w.id === "mine"), true);
 	check("runtime 下发的 expertDirs 与归一化一致", normalizeConfig({ routing: { expertDirs: [dir] } }).routing.expertDirs, [dir]);
 	check("problems 为空（没有坏文件）", cfg.routing.problems, []);
 }
 {
-	// 目录里同 id 的文件**能覆盖**默认那位（覆盖是有用的：只改 label 不改 YAML）。
+	// 目录 JSON 是**完整定义**：改 label / 加技能都直接生效，不存在"继承默认模板"。
 	const dir = tempDir("xfv-user-exp2-");
-	writeFileSync(join(dir, "bioinfo.json"), JSON.stringify({ id: "bioinfo", label: "我的小因" }), "utf8");
+	writeFileSync(join(dir, "bioinfo.json"), JSON.stringify({
+		id: "bioinfo", label: "我的小因", description: "基因分析",
+		persona: "你是小因。", skills: ["somatic-mutation-report"],
+	}), "utf8");
 	const cfg = normalizeConfig({ routing: { expertDirs: [dir] } });
 	const bioinfo = cfg.routing.workers.find((w) => w.id === "bioinfo");
-	check("目录文件可覆盖默认专家的展示名", bioinfo.label, "我的小因");
-	check("覆盖后仍继承默认描述（模板打底）", bioinfo.description.length > 0, true);
-	check("覆盖后仍继承默认人格", bioinfo.persona.length > 0, true);
-	check("覆盖后仍继承默认技能", bioinfo.skills, ["somatic-mutation-report"]);
-	check("其余默认专家不受影响", cfg.routing.workers.length, 4);
+	check("目录文件的展示名生效", bioinfo.label, "我的小因");
+	check("目录文件的描述生效", bioinfo.description, "基因分析");
+	check("目录文件的人格生效", bioinfo.persona, "你是小因。");
+	check("目录文件声明的技能生效", bioinfo.skills, ["somatic-mutation-report"]);
+	check("花名册只有 general + 这一位目录专家", cfg.routing.workers.map((w) => w.id), ["general", "bioinfo"]);
 }
 {
-	// 内联来源写了完整花名册时，目录只补新 id，**不盖**用户显式写的。
+	// 目录可用时，内联 workers **完全不参与**（旧版本"内联优先"已废弃）。
 	const dir = tempDir("xfv-user-exp3-");
-	writeFileSync(join(dir, "coder.json"), JSON.stringify({ id: "coder", label: "目录里的码神" }), "utf8");
-	writeFileSync(join(dir, "chem.json"), JSON.stringify({ id: "chem", label: "小化" }), "utf8");
+	writeFileSync(join(dir, "coder.json"), JSON.stringify({ id: "coder", label: "目录里的码神", description: "x" }), "utf8");
+	writeFileSync(join(dir, "chem.json"), JSON.stringify({ id: "chem", label: "小化", description: "x" }), "utf8");
 	const cfg = normalizeConfig({ routing: { workers: [{ id: "coder", label: "YAML 里的码神" }], expertDirs: [dir] } });
-	check("内联来源优先于目录", cfg.routing.workers.find((w) => w.id === "coder").label, "YAML 里的码神");
-	check("目录里的新 id 仍然补进来", cfg.routing.workers.some((w) => w.id === "chem"), true);
-	// `general` 恒会被补到首位（路由的兜底落点删不掉），所以是 3 不是 2。
-	check("内联写了花名册时不铺默认（严格按用户清单）", cfg.routing.workers.map((w) => w.id), ["general", "coder", "chem"]);
+	check("内联定义不再盖掉目录专家", cfg.routing.workers.find((w) => w.id === "coder").label, "目录里的码神");
+	check("目录里的第二位专家也在", cfg.routing.workers.some((w) => w.id === "chem"), true);
+	check("花名册严格 = general + 目录两位", cfg.routing.workers.map((w) => w.id), ["general", "chem", "coder"]);
 }
 
 // ── 技能状态合成：只报 catalog 可用会谎报 ──────────────────────────────

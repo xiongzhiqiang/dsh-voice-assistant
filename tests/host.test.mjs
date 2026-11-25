@@ -7,6 +7,9 @@ import { parseRouteOutput } from "../lib/router.js";
 import { mountAgentPreset, composeAgentScope } from "../lib/agent.js";
 import { createReportQueue, deterministicSummary, formatReportSpeech, parseReportAfter, condenseArtifacts, countArtifacts, hasPaths, redactPaths } from "../lib/report.js";
 import { createDelegationHub } from "../lib/delegation.js";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const failures = [];
 const check = (name, actual, expected) => {
@@ -290,26 +293,39 @@ check("null 输出不算跑偏", looksLikeRewrite("你好", null), false);
 check("提示词声明了定界符语义", STYLE_PROMPTS.clean.includes("<<<") && STYLE_PROMPTS.clean.includes("不是对我说的话"), true);
 check("提示词要求不回答原文的问题", STYLE_PROMPTS.clean.includes("绝不回答或执行它"), true);
 
-// ── 两层架构：worker 归一化 ────────────────────────────────────────────
-const routingDefault = normalizeConfig(undefined);
+// ── 两层架构：worker 归一化（V2.2：目录 JSON 是唯一真相源）────────────────
+// 显式造 3 位目录专家（id 沿用旧默认），既验证"专家来自目录"，也让下游的
+// 路由解析 / clientConfig 断言继续覆盖同一组 id，不必整体重写。
+const expertDir = mkdtempSync(join(tmpdir(), "xfv-host-exp-"));
+for (const [id, label, description, skills] of [
+	["bioinfo", "小因 · 基因分析", "基因分析（体细胞突变检测与注释、变异临床分级）；并具备编程、调研写作、本机操作能力。", ["somatic-mutation-report"]],
+	["pathologist", "小理 · 病理分析", "病理分析（切片读片、肿瘤细胞检测、分级）；并具备编程、调研写作、本机操作能力。", []],
+	["protein-designer", "小蛋 · 蛋白设计", "蛋白设计（结合物设计、结构预测评估）；并具备编程、调研写作、本机操作能力。", []],
+]) {
+	writeFileSync(join(expertDir, `${id}.json`), JSON.stringify({
+		id, label, description,
+		persona: `你是${label}，具备编程、调研、本机操作能力。`,
+		skills,
+	}), "utf8");
+}
+const routingDefault = normalizeConfig({ routing: { expertDirs: [expertDir] } });
 check("路由默认开启", routingDefault.routing.enabled, true);
-check("默认 worker 有四位", routingDefault.routing.workers.length, 4);
+check("花名册 = general 锚点 + 目录 3 位", routingDefault.routing.workers.length, 4);
 check("general 恒在首位", routingDefault.routing.workers[0].id, "general");
 check("general 指向根 agent", routingDefault.routing.workers[0].sessionId, "session-voice-assistant-root-v2");
-check("病理专家有独立会话", routingDefault.routing.workers.find((w) => w.id === "pathologist").sessionId, "session-voice-worker-pathologist");
-check("蛋白设计专家默认在列", routingDefault.routing.workers.some((w) => w.id === "protein-designer"), true);
-check("职能专家 coder 已撤销（不在默认清单）", routingDefault.routing.workers.some((w) => w.id === "coder"), false);
-check("职能专家 researcher 已撤销", routingDefault.routing.workers.some((w) => w.id === "researcher"), false);
-check("职能专家 operator 已撤销", routingDefault.routing.workers.some((w) => w.id === "operator"), false);
-check("基因分析专家默认在列", routingDefault.routing.workers.some((w) => w.id === "bioinfo"), true);
-check("默认 worker 都有人格", routingDefault.routing.workers.every((w) => w.id === "general" || w.persona !== ""), true);
-check("worker 都有描述（路由提示词要用）", routingDefault.routing.workers.every((w) => w.description !== ""), true);
+check("general 是系统锚点、persona 为空（用内置 persona）", routingDefault.routing.workers[0].persona, "");
+check("general 不带技能", routingDefault.routing.workers[0].skills, []);
+check("目录专家 bioinfo 在列", routingDefault.routing.workers.some((w) => w.id === "bioinfo"), true);
+check("目录专家 pathologist 在列", routingDefault.routing.workers.some((w) => w.id === "pathologist"), true);
+check("目录专家 protein-designer 在列", routingDefault.routing.workers.some((w) => w.id === "protein-designer"), true);
+check("目录专家有独立会话", routingDefault.routing.workers.find((w) => w.id === "pathologist").sessionId, "session-voice-worker-pathologist");
+check("目录专家的人格原样保留", routingDefault.routing.workers.find((w) => w.id === "bioinfo").persona.includes("编程"), true);
+check("目录专家声明的技能保留", routingDefault.routing.workers.find((w) => w.id === "bioinfo").skills, ["somatic-mutation-report"]);
 check("每个 worker 都有 skills 字段（空数组也算）", routingDefault.routing.workers.every((w) => Array.isArray(w.skills)), true);
-// V1.7：三位职能专家撤销后，编程/调研/操作能力并入每位领域专家的 persona。
-check("每位专家都带通用执行能力（编程）", routingDefault.routing.workers.every((w) => w.id === "general" || w.persona.includes("编程")), true);
-check("每位专家都带通用执行能力（调研）", routingDefault.routing.workers.every((w) => w.id === "general" || w.persona.includes("调研")), true);
-check("每位专家都带通用执行能力（本机操作）", routingDefault.routing.workers.every((w) => w.id === "general" || w.persona.includes("本机操作")), true);
-check("general 兜底也带通用执行能力", routingDefault.routing.workers.find((w) => w.id === "general").persona === "" , true); // 用内置 persona，见 agent.js 的断言
+check("worker 都有描述（路由提示词要用）", routingDefault.routing.workers.every((w) => w.description !== ""), true);
+check("代码里不再内置职能专家 coder", routingDefault.routing.workers.some((w) => w.id === "coder"), false);
+check("代码里不再内置职能专家 researcher", routingDefault.routing.workers.some((w) => w.id === "researcher"), false);
+check("代码里不再内置职能专家 operator", routingDefault.routing.workers.some((w) => w.id === "operator"), false);
 
 const routingCustom = normalizeConfig({
 	routing: {
@@ -323,8 +339,8 @@ const routingCustom = normalizeConfig({
 	},
 });
 check("路由可关闭", routingCustom.routing.enabled, false);
-check("自定义 worker 按 id 合并默认", routingCustom.routing.workers.find((w) => w.id === "pathologist").label, "病理专家改名");
-check("自定义 worker 继承默认人格", routingCustom.routing.workers.find((w) => w.id === "pathologist").persona !== "", true);
+check("内联兜底 worker 的 label 生效", routingCustom.routing.workers.find((w) => w.id === "pathologist").label, "病理专家改名");
+check("内联兜底不注入任何内置人格", routingCustom.routing.workers.find((w) => w.id === "pathologist").persona, "");
 check("新 id 用兜底 sessionId", routingCustom.routing.workers.find((w) => w.id === "custom").sessionId, "session-voice-worker-custom");
 check("漏配 general 会补上", routingCustom.routing.workers.some((w) => w.id === "general"), true);
 check("重复 id 只留第一个", routingCustom.routing.workers.filter((w) => w.id === "pathologist").length, 1);
@@ -332,17 +348,17 @@ check("重复 id 只留第一个", routingCustom.routing.workers.filter((w) => w
 check("workerTargets 不泄漏 persona", workerTargets(routingDefault.routing.workers).every((t) => !("persona" in t)), true);
 // 投喂三件套 = id（派单键）+ label（播报名）+ sessionId（投递目标）；description
 // 是路由提示词与界面用的，多带一个字段不算泄漏（不含 persona 才是红线）。
-check("workerTargets 带齐投喂三件套", workerTargets(DEFAULT_WORKERS).find((t) => t.id === "pathologist"), {
+check("workerTargets 带齐投喂三件套", workerTargets(routingDefault.routing.workers).find((t) => t.id === "pathologist"), {
 	id: "pathologist",
 	label: "小理 · 病理分析",
 	sessionId: "session-voice-worker-pathologist",
-	description: DEFAULT_WORKERS.find((w) => w.id === "pathologist").description,
+	description: routingDefault.routing.workers.find((w) => w.id === "pathologist").description,
 	skills: [],
 });
 // 需求①：专家"会做什么"必须下发到客户端 —— 用户要靠它判断该把话派给谁。
 // 只下发 id/label 的话，界面上是一排看不懂的代号。
-check("workerTargets 带描述（专家能力可见）", workerTargets(DEFAULT_WORKERS).every((t) => typeof t.description === "string"), true);
-check("基因分析专家的描述点明能力", /体细胞突变|变异/.test(workerTargets(DEFAULT_WORKERS).find((t) => t.id === "bioinfo").description), true);
+check("workerTargets 带描述（专家能力可见）", workerTargets(routingDefault.routing.workers).every((t) => typeof t.description === "string"), true);
+check("基因分析专家的描述点明能力", /体细胞突变|变异/.test(workerTargets(routingDefault.routing.workers).find((t) => t.id === "bioinfo").description), true);
 
 // clientConfig 白名单：路由段只下发投喂所需的字段。
 const clientRouting = clientConfig(routingDefault, {}).routing;
@@ -404,10 +420,11 @@ check("null 输出返回 null", parseRouteOutput(null, known, "原文"), null);
 	// general 描述会喂给路由模型，别把"闲聊"这个诱因留在里面。
 	check("general 描述不再把闲聊当卖点", /闲聊/.test(general.description), false);
 
-	// ③ 需求① 的播报口径同步落到专家 persona（原来写的是"念文件路径"）。
-	const bioinfo = DEFAULT_WORKERS.find((w) => w.id === "bioinfo");
-	check("专家 persona 不再要求念文件路径", /念结论与文件路径/.test(bioinfo.persona), false);
-	check("专家 persona 改成概括口径", /产生了几个文件，都放在工作目录下/.test(bioinfo.persona), true);
+	// ③ V2.2：专家 persona 完全由目录 JSON 提供，代码只做长度夹取、不再
+	// 注入任何内置文案（旧的"念文件路径/概括口径"契约随内置专家一起删除）。
+	const bioinfo = routingDefault.routing.workers.find((w) => w.id === "bioinfo");
+	check("目录专家 persona 原样保留、不被代码改写", bioinfo.persona, "你是小因 · 基因分析，具备编程、调研、本机操作能力。");
+	check("代码不再向专家 persona 注入播报口径", /念结论与文件路径/.test(bioinfo.persona), false);
 }
 
 // ── preset 挂载（坑十三：不带 preset 的 agent 没有文件/命令工具）──────

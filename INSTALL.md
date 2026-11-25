@@ -122,7 +122,7 @@ V1.8 常用项：
       global: false                     # 全局记忆（对所有会话生效），默认关闭
       text: ''
     routing:
-      expertDirs:                       # 自定义专家目录（可选，追加不替换）
+      expertDirs:                       # 专家定义唯一真相源（不配则用 ~/.dsh/voice-assistant/experts）
         - /path/to/your/experts
 ```
 
@@ -155,16 +155,41 @@ V1.8 常用项：
   位置可各自拖拽，拖过的位置会记住。收起只在本任务内生效，任务结束自动恢复。
 - hover 桌宠可看到它当前正在处理的任务。
 
-### 4.1 专家管理（V1.7，写文件 + 当场生效）
+### 4.1 专家管理（V2.2：唯一真相源 + 实时同步）
 
-默认 4 位专家：`general`（小凤·通用，兜底）、`bioinfo`（小因·基因分析）、
-`pathologist`（小理·病理分析）、`protein-designer`（小蛋·蛋白设计）。
+**专家定义只有一份**：`~/.dsh/voice-assistant/experts/*.json`（可用
+`routing.expertDirs` 改路径，不配就用这个默认目录）。代码里不再内置任何
+领域专家，只有 `general` 这一个系统兜底锚点（路由失败落点，不可删）。
+目录里每个顶层 `*.json` 是一位专家，字段是**完整定义**、不跟任何模板合并：
 
-- 语音：「列出专家」「新增专家 化学，负责化学分析」「删除专家 化学」
-- HTTP（前缀 `/plugins/dsh-voice-assistant/api`）：
-  - `GET /experts` 列出；`POST /experts` 新增；`DELETE /experts/<id>` 删除
-- 也可以直接往 `expertDirs` 目录丢 JSON 专家定义，重启或热更新生效。
-- 内置专家删除写 `{"disabled":true}` 墓碑；`general` 不可删。
+```json
+{
+  "id": "chem",
+  "label": "小化 · 化学",
+  "description": "分子建模与性质预测。",
+  "persona": "你是「小化」，专注化学分析……",
+  "skills": []
+}
+```
+
+四个入口都汇到同一份文件、且**当场生效（约 250ms，无需重启）**：
+
+| 入口 | 做法 |
+|---|---|
+| 语音 | 「列出专家」「新增专家 化学，负责化学分析」「删除专家 化学」 |
+| HTTP（前缀 `/plugins/dsh-voice-assistant/api`） | `GET /experts` 列出；`POST /experts` 新增；`DELETE /experts/<id>` 删除 |
+| 手工改目录 | 直接往目录丢/删/编辑 `*.json`，`fs.watch` 自动重扫 |
+| 直接编辑 JSON | 同上，改完即时同步 |
+
+每次变动都会调 `applyChanges()`：原地更新运行时花名册（路由 prompt、
+客户端配置、桌宠头像映射都跟着变），新增的建常驻 agent、删除的从委托中枢
+注销并清掉会话注册表里该专家的会话与跨会话摘要。
+
+- 删除 = 直接删掉 `<id>.json`（旧版 `{"disabled":true}` 墓碑仍兼容）。
+- `general` 不可删；目录里写 `general.json` 会被忽略。
+- `id` 必须匹配 `[a-z0-9][a-z0-9_-]{0,63}`，`label` 与 `description` 必填。
+- 目录不存在属正常初始态，不会报假红；`routing.workers` / `routing.experts`
+  内联清单只在目录全部不可读时作兼容兜底，不再作为配置入口。
 
 ### 4.2 会话管理（V1.8）
 
@@ -218,12 +243,12 @@ npm run probe:session-cmd -- "<带 token 的 URL>"   # 语音会话命令
 # 1) 取 token（按 mtime 取最新日志里的 token）
 # 2) GET /?token=xxx → 303 + Set-Cookie
 # 3) 带 cookie 访问：/plugins/dsh-voice-assistant/api/health
-#    期望：HTTP 200、version=2.1.0、ok=true、problems=[]、asrLocal.native 两项为 true
+#    期望：HTTP 200、version=2.2.0、ok=true、problems=[]、asrLocal.native 两项为 true
 ```
 
 ---
 
-## 6. 目录结构（V1.8）
+## 6. 目录结构（V2.2）
 
 ```
 index.js                     插件入口：装配宿主半
@@ -232,9 +257,9 @@ build.mjs                    零依赖 ESM → classic script 打包器
 lib/
   config.js  client.js      配置归一化 / 客户端注入
   router.js  delegation.js  意图路由 / 派单中枢（slot 复合键）
-  workers.js  agent.js      专家 worker 建立 / agent 定义
-  expert-registry.js        专家定义 CRUD + 校验 + 墓碑
-  expert-manager.js         专家热生效（原地 splice）
+  workers.js  agent.js      general 锚点 + 目录 JSON 扫描 / agent 定义
+  expert-registry.js        目录 JSON 的 CRUD + 校验 + 原子写盘
+  expert-manager.js         增删落盘 + 原地 splice 热生效 + fs.watch 目录监听
   expert-sessions.js        会话注册表 + 跨会话记忆摘要（<expertDir>/_state/sessions.json）
   session-manager.js        会话管理中枢（HTTP 与语音命令共用）
   routes.js                 HTTP 路由（health/experts/sessions/delegate…）
@@ -317,4 +342,4 @@ asr:
 
 ## 9. 版本
 
-`2.1.0` · MIT License · 详细变更与历史踩坑见 [README.md](./README.md)。
+`2.2.0` · MIT License · 详细变更与历史踩坑见 [README.md](./README.md)。

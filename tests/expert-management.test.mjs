@@ -23,19 +23,21 @@ const check = (name, actual, expected) => {
 };
 const tempDir = (prefix) => mkdtempSync(join(tmpdir(), prefix));
 
-// ── ① 专家清单重整（4 位领域专家，能力合并）────────────────────────────
-check("默认 4 位专家", DEFAULT_WORKERS.length, 4);
-check("默认 id 清单", DEFAULT_WORKERS.map((w) => w.id), ["general", "bioinfo", "pathologist", "protein-designer"]);
-check("转录组未转成专家（用户要求一并删除）", DEFAULT_WORKERS.some((w) => w.id === "transcriptome-expert"), false);
-for (const id of ["bioinfo", "pathologist", "protein-designer"]) {
-	const w = DEFAULT_WORKERS.find((x) => x.id === id);
-	check(`${id} persona 含编程能力`, w.persona.includes("编程"), true);
-	check(`${id} persona 含调研能力`, w.persona.includes("调研"), true);
-	check(`${id} persona 含本机操作能力`, w.persona.includes("本机操作"), true);
+// ── ① V2.2：专家定义唯一真相源是目录 JSON，代码里只剩 general 系统锚点 ────
+check("代码里不再内置任何领域专家", DEFAULT_WORKERS.length, 1);
+check("默认 id 清单（只剩 general）", DEFAULT_WORKERS.map((w) => w.id), ["general"]);
+check("general 是系统兜底锚点、不是可增删的专家", DEFAULT_WORKERS[0].id, "general");
+check("general 的 sessionId 留空（由 normalizeWorkers 指向根 agent）", DEFAULT_WORKERS[0].sessionId, "");
+check("general 不声明技能", DEFAULT_WORKERS[0].skills, []);
+check("general 描述仍约束「临床/生医/科研派给专家」", DEFAULT_WORKERS[0].description.includes("临床"), true);
+{
+	// 目录为空 / 没配目录时，专家层只剩 general，不再铺任何内置领域专家。
+	const onlyAnchor = normalizeWorkers(null, "session-voice-assistant-root-v2");
+	check("目录为空时只有 general 一位", onlyAnchor.map((w) => w.id), ["general"]);
+	check("general 恒指向根 agent", onlyAnchor[0].sessionId, "session-voice-assistant-root-v2");
+	const cfgEmpty = normalizeConfig({ routing: { expertDirs: [tempDir("xfv-empty-")] } });
+	check("空目录配置里没有内置领域专家", cfgEmpty.routing.workers.map((w) => w.id), ["general"]);
 }
-check("病理专家有独立会话", DEFAULT_WORKERS.find((w) => w.id === "pathologist").sessionId, "session-voice-worker-pathologist");
-check("蛋白设计专家有独立会话", DEFAULT_WORKERS.find((w) => w.id === "protein-designer").sessionId, "session-voice-worker-protein-designer");
-check("基因专家保留技能", DEFAULT_WORKERS.find((w) => w.id === "bioinfo").skills, ["somatic-mutation-report"]);
 
 // ── ② 输入校验 ──────────────────────────────────────────────────────────
 check("id 合法判据：正常", EXPERT_ID_RE.test("chem-v2"), true);
@@ -68,9 +70,10 @@ check("校验：skills 非数组被忽略", normalizeExpertInput({ id: "chem", l
 	const removed = reg.remove("chem");
 	check("删自定义专家是删文件", removed.mode, "file");
 	check("文件已删", existsSync(join(dir, "chem.json")), false);
-	// 删内置专家 → 墓碑
+	// V2.2 已无内置专家；删一个目录里不存在的 id 时仍写 disabled 墓碑，
+	// 保证「删除」这个动作幂等且一定落盘（兼容旧版本遗留的墓碑文件）。
 	const tomb = reg.remove("coder");
-	check("删内置专家是写墓碑", tomb.mode, "tombstone");
+	check("删不存在的 id 写墓碑（幂等落盘）", tomb.mode, "tombstone");
 	check("墓碑文件存在", existsSync(join(dir, "coder.json")), true);
 	check("墓碑内容 disabled", JSON.parse(readFileSync(join(dir, "coder.json"), "utf8")).disabled, true);
 	check("墓碑在 list 里单独列出", reg.list().tombstones, ["coder"]);
@@ -80,26 +83,48 @@ check("校验：skills 非数组被忽略", normalizeExpertInput({ id: "chem", l
 	check("重复删已是墓碑的 id 仍是墓碑", reg.remove("coder").mode, "tombstone");
 }
 
-// ── ④ 墓碑压过默认清单 ──────────────────────────────────────────────────
+// ── ④ V2.2 单一数据源：目录可用时只认目录，内联来源不参与 ────────────────
 {
 	const dir = tempDir("xfv-tomb-");
 	writeFileSync(join(dir, "coder.json"), JSON.stringify({ id: "coder", disabled: true }), "utf8");
+	writeFileSync(join(dir, "chem.json"), JSON.stringify({ id: "chem", label: "小化 · 化学", description: "化学分析" }), "utf8");
 	const merged = mergeWorkerSources(null, null, [dir], null);
 	check("墓碑被收集", merged.disabled, ["coder"]);
-	check("合并后不含被删的 coder（默认清单里本来也没有，此处验证不误报）", merged.items.some((i) => i.id === "coder"), false);
-	// 用旧代码里仍存在的默认专家做墓碑测试： bioinfo
-	writeFileSync(join(dir, "bioinfo.json"), JSON.stringify({ id: "bioinfo", disabled: true }), "utf8");
+	check("目录可用时只认目录 JSON", merged.items.map((i) => i.id), ["chem"]);
+	check("墓碑不进花名册", merged.items.some((i) => i.id === "coder"), false);
+
+	// 内联来源在目录可用时**不参与**（旧版本的双源漂移已被消除）。
+	const withInline = mergeWorkerSources(
+		[{ id: "legacy", label: "旧内联" }],
+		[{ id: "legacy2", label: "旧内联2" }],
+		[dir],
+		null,
+	);
+	check("内联 workers 被忽略", withInline.items.some((i) => i.id === "legacy"), false);
+	check("内联 experts 被忽略", withInline.items.some((i) => i.id === "legacy2"), false);
+	check("内联忽略后仍是目录唯一来源", withInline.items.map((i) => i.id), ["chem"]);
+
+	// 把 chem 改成墓碑 → 它从花名册消失；general 由 normalizeWorkers 恒补。
+	writeFileSync(join(dir, "chem.json"), JSON.stringify({ id: "chem", disabled: true }), "utf8");
 	const merged2 = mergeWorkerSources(null, null, [dir], null);
-	check("墓碑删默认专家 bioinfo", merged2.items.some((i) => i.id === "bioinfo"), false);
-	check("墓碑不影响其它默认专家", merged2.items.some((i) => i.id === "pathologist"), true);
-	check("general 永不被墓碑删掉", merged2.items.some((i) => i.id === "general"), true);
-	// 全删光也不会恢复默认（避免 items 空被 normalizeWorkers 误判未配置）
-	const dir2 = tempDir("xfv-tomball-");
-	for (const w of DEFAULT_WORKERS) writeFileSync(join(dir2, `${w.id}.json`), JSON.stringify({ id: w.id, disabled: true }), "utf8");
-	const all = mergeWorkerSources(null, null, [dir2], null);
-	check("删光后 items 只剩 general", all.items.map((i) => i.id), ["general"]);
-	const cfg = normalizeConfig({ routing: { expertDirs: [dir2] } });
-	check("删光后配置里仍只有 general（没复活默认）", cfg.routing.workers.map((w) => w.id), ["general"]);
+	check("墓碑删掉目录里已定义的专家", merged2.items.some((i) => i.id === "chem"), false);
+	check("items 为空（general 不来自目录）", merged2.items.length, 0);
+	check("general 恒补、不受墓碑影响", normalizeWorkers(merged2.items, "root").map((w) => w.id), ["general"]);
+
+	// 目录里写 general.json 也不能覆盖系统锚点。
+	writeFileSync(join(dir, "general.json"), JSON.stringify({ id: "general", label: "冒充" }), "utf8");
+	const merged3 = mergeWorkerSources(null, null, [dir], null);
+	check("目录里的 general.json 被忽略", merged3.items.some((i) => i.id === "general"), false);
+	const cfg = normalizeConfig({ routing: { expertDirs: [dir] } });
+	check("配置里 general 仍是系统锚点", cfg.routing.workers[0].label, "小凤 · 通用");
+	check("删光后不会复活任何内置领域专家", cfg.routing.workers.map((w) => w.id), ["general"]);
+
+	// 目录全部不可读时才回退内联来源（兼容旧配置）。
+	const inlineOnly = normalizeConfig({ routing: { workers: [{ id: "legacy", label: "旧专家", description: "x" }] } });
+	check("未配目录时回退内联 workers", inlineOnly.routing.workers.map((w) => w.id), ["general", "legacy"]);
+	const gone = mergeWorkerSources([], [], [join(dir, "nope")], "");
+	check("目录不存在（ENOENT）不记假红 problem", gone.problems.length, 0);
+	check("目录不存在时由 normalizeWorkers 补 general", normalizeWorkers(gone.items, "root").map((w) => w.id), ["general"]);
 }
 
 // ── ⑤ 默认目录回退 ──────────────────────────────────────────────────────

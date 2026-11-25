@@ -13,7 +13,8 @@ import {
 	toggleMinimized,
 } from "../src/client/ui/expert-visual.js";
 import { clientConfig, normalizeConfig } from "../lib/config.js";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 
@@ -45,7 +46,7 @@ check("未知 id 的 URL 也安全", avatarUrl("/api", "../secret"), "/api/avata
 // 打包清单必须含 assets/ —— 漏了它 junction 安装看不出问题、
 // 打包安装后所有图像全消失（V1.4 的 skills/ 就是这个坑）。
 check("files 清单含 assets/", pkg.files.includes("assets/"), true);
-check("版本号与 lib/version.js 一致", pkg.version, "2.1.0");
+check("版本号与 lib/version.js 一致", pkg.version, "2.2.0");
 
 // 六张素材必须都真实存在且带 alpha（抠过图），否则运行期会出白底方块。
 const ASSET_DIR = join(process.cwd(), "assets", "characters");
@@ -94,8 +95,19 @@ check("label 缺省回落 id", projectActivities([{ id: "general" }], []).worker
 const cfg = clientConfig(normalizeConfig(undefined), {});
 check("配置里有素材 base", cfg.ui.avatars.base, `${HOST_PREFIX}/avatars`);
 check("配置里有音球图", cfg.ui.avatars.orb, `${HOST_PREFIX}/avatars/orb.png`);
-check("配置里按 worker id 映射头像", typeof cfg.ui.avatars.byWorker.bioinfo, "string");
+check("配置里按 worker id 映射头像", typeof cfg.ui.avatars.byWorker.general, "string");
 check("宿主与客户端 API 前缀一致", CLIENT_PREFIX, HOST_PREFIX);
+
+// V2.2：byWorker 按当前花名册**动态**生成 —— 目录里新增的专家自动拿到头像，
+// 不需要改代码里的静态白名单（需求①「同步各个部分的专家列表」）。
+{
+	const dir = mkdtempSync(join(tmpdir(), "xfv-avatar-"));
+	writeFileSync(join(dir, "chem.json"), JSON.stringify({ id: "chem", label: "小化 · 化学", description: "化学分析" }), "utf8");
+	const dyn = clientConfig(normalizeConfig({ routing: { expertDirs: [dir] } }), {});
+	check("目录专家自动进 byWorker", typeof dyn.ui.avatars.byWorker.chem, "string");
+	check("未知 id 的头像回落 general 图", dyn.ui.avatars.byWorker.chem.endsWith("/general.png"), true);
+	check("general 始终在映射里", typeof dyn.ui.avatars.byWorker.general, "string");
+}
 
 // ── 拖拽几何 ──────────────────────────────────────────────────────────
 const vp = { w: 1000, h: 800 };

@@ -39,7 +39,7 @@ import { ensureWorkerAgents } from "./lib/workers.js";
 import { describeExpertSkills, loadSkillCatalog } from "./lib/skills.js";
 import { createDelegationHub } from "./lib/delegation.js";
 import { createInteractionHub } from "./lib/interactions.js";
-import { createExpertManager, expertDirFromConfig } from "./lib/expert-manager.js";
+import { createExpertManager, defaultExpertDir, expertDirFromConfig } from "./lib/expert-manager.js";
 import { createExpertSessionStore } from "./lib/expert-sessions.js";
 import { createSessionManager } from "./lib/session-manager.js";
 import { labelAgentSession, registerGlobalMemory, ensureSessionNotArchived } from "./lib/identity.js";
@@ -80,7 +80,23 @@ function summarizeSessions(all) {
  * @param config - `cordis.patch.yml` 中 `voice-assistant` 条目的 `config`。
  */
 export function apply(ctx, config = {}) {
-	const normalized = normalizeConfig(config);
+	// V2.2：专家定义唯一真相源是目录 JSON（~/.dsh/voice-assistant/experts）。
+	// 用户没显式配 expertDirs 时，把默认目录补进配置：这样管理接口 add/remove
+	// 写入的 JSON 与配置扫描的目录永远是同一个，不会出现"文件写了、运行时却
+	// 读不到"的双源漂移（需求①③）。effectiveConfig 同时作为 expertManager 的
+	// originalConfig，保证 applyChanges() 重扫时口径一致。
+	const rawRouting =
+		config !== null && typeof config === "object" && !Array.isArray(config) &&
+		config.routing !== null && typeof config.routing === "object"
+			? config.routing
+			: {};
+	const hasExplicitDirs =
+		(Array.isArray(rawRouting.expertDirs) && rawRouting.expertDirs.length > 0) ||
+		(typeof rawRouting.expertDir === "string" && rawRouting.expertDir.trim() !== "");
+	const effectiveConfig = hasExplicitDirs
+		? config
+		: { ...(config ?? {}), routing: { ...rawRouting, expertDirs: [defaultExpertDir()] } };
+	const normalized = normalizeConfig(effectiveConfig);
 
 	/**
 	 * V2.1：自包含本地识别服务。模型与原生包都在本项目内（vendor/ + .data/asr/），
@@ -269,11 +285,11 @@ export function apply(ctx, config = {}) {
 	};
 
 	// V1.7：专家管理中枢。组装在 apply 顶层、API 注册前，确保 routes 拿到的是
-	// 同一个实例。`config`（apply 的原始入参）用于重扫目录；normalized 的
-	// routing.workers 数组会被原地更新，routes.js / clientConfig 持有的引用
-	// 因此自动看到最新清单。
+	// 同一个实例。`effectiveConfig`（补过默认专家目录的原始配置）用于重扫目录；
+	// normalized 的 routing.workers 数组会被原地更新，routes.js / clientConfig
+	// 持有的引用因此自动看到最新清单。
 	expertManager = createExpertManager({
-		originalConfig: config,
+		originalConfig: effectiveConfig,
 		normalized,
 		delegation,
 		skillCatalog,
@@ -288,8 +304,15 @@ export function apply(ctx, config = {}) {
 		onWorkerRemoved: (id) => {
 			workersStatus = workersStatus.filter((item) => item.id !== id);
 		},
+		// V2.2：目录 JSON 是唯一真相源。删专家时清会话；手工增删 JSON 时
+		// watcher 自动重扫并同步运行时（agent/delegation/health）。
+		sessionStore,
 		logger: ctx.logger,
 	});
+	// 目录监听生命周期跟随插件卸载。
+	ctx.effect(() => () => expertManager?.stopWatching?.(), "voice-assistant: 专家目录监听生命周期");
+	// V2.2：启动监听。手工往目录丢/删/改 JSON 也会实时同步花名册与 agent 运行时。
+	expertManager.startWatching();
 
 	// V1.8：会话管理中枢（开/切/关会话 + 记忆摘要），HTTP 与语音命令共用。
 	sessionManager = createSessionManager({

@@ -7,10 +7,33 @@
 一个 DSH bundle 插件：宿主半（配置 / 润色 / 路由 / worker 专家 / **专家技能** /
 **委托中枢** / **互动中枢** / 语音代理）+ 客户端半（浮层 / 状态机 / 唤醒 / 播报）。
 
-版本：`2.1.0`（V2.1 = 识别后端完全内置：自带 SenseVoice / Whisper 的运行时代码、原生包与模型，不再依赖 `voice-input-bundle` 或 `dsh-ears` 安装）。
+版本：`2.2.0`（V2.2 = 专家系统以 `~/.dsh/voice-assistant/experts/*.json` 为唯一真相源，增删改实时同步运行时；V2.1 = 识别后端完全内置，不再依赖 `voice-input-bundle` / `dsh-ears` 安装）。
 
 > **新用户请先看 [INSTALL.md](./INSTALL.md)** —— 独立的安装与使用说明（前置要求、
 > 安装、配置、语音/专家/会话命令、验证、卸载、识别后端）。本 README 偏设计原理与历史踩坑。
+
+## V2.2：专家系统单一数据源（目录 JSON 说了算）
+
+V2.1 之前专家列表有**四个来源**互相覆盖：代码里的 `DEFAULT_WORKERS`（4 位内置
+专家）、`routing.workers`、`routing.experts`、`routing.expertDirs` 目录 JSON。
+同一位专家在不同来源里可能不一致 —— 删了目录文件、YAML 里却还活着，界面上的
+专家清单和路由 / 桌宠 / 会话各看各的。
+
+V2.2 收成**一个真相源**：`~/.dsh/voice-assistant/experts/*.json`。
+
+| 变化 | 说明 |
+|---|---|
+| 删除内置专家 | `lib/workers.js` 的 `DEFAULT_WORKERS` 四位领域专家整体删除，代码里只剩 `general` 系统兜底锚点（路由失败落点、不可删、不来自目录） |
+| 内联来源降级 | `routing.workers` / `routing.experts` 只在**目录全部不可读**时作兼容兜底；目录可用时一律只认目录 |
+| 增删必落盘 | 语音命令 / HTTP `POST·DELETE /experts` / 手工丢 JSON 三个入口，最终都写或删该目录下的 `<id>.json` |
+| 实时同步 | `expert-manager.js` 的 `applyChanges()` 原地 splice 花名册（routes / clientConfig / 路由 prompt 持同一引用），并同步委托中枢、会话注册表、health；`fs.watch` 监听目录，手工改 JSON 也在约 250ms 内生效 |
+| 默认目录注入 | 用户没配 `expertDirs` 时，装配层自动把默认目录补进配置，保证「管理接口写入的 JSON」一定能被扫描到 |
+
+`general` 不是一位专家，是路由架构的兜底锚点：`sessionId` 恒指向根 agent、
+`RESERVED_IDS` 禁止删除，目录里写 `general.json` 也会被忽略。
+
+删专家时：目录 JSON 被删除、该专家从花名册 / 委托中枢 / health 移除，会话注册表
+里它的会话条目与跨会话摘要一并清掉（DSH 侧历史会话目录保留，避免误删数据）。
 
 ## V2.1：语音识别完全自主（不再依赖任何外部语音插件）
 
@@ -361,18 +384,14 @@ V1.4 之后按真机反馈收紧了三件事，都不是新功能，而是**把�
 6.0s，正好压在 6s 边界上 —— 首次说话偶发降级，而降级的后果在需求③ 之后被
 放大了（指令落到不聊临床的小凤身上）。
 
-### 自己加一位专家（需求①的入口）
+### 自己加一位专家（V2.2：唯一入口 = 目录 JSON）
 
-三种方式，**按 id 去重、先到先得**（写在前面的胜出）：
-
-| 方式 | 怎么写 | 适合 |
-|---|---|---|
-| `routing.workers` | YAML 内联数组，最直接 | 一次性配置 |
-| `routing.experts` | 同格式的语义化别名 | 同上，读起来更清楚 |
-| `routing.expertDirs` | 目录，每个 `*.json` 是一位专家 | **丢文件即生效，不必改 YAML** |
+只有**一个**真相源：`~/.dsh/voice-assistant/experts/`（可用 `routing.expertDirs`
+改路径）。目录里每个顶层 `*.json` 是一位专家；`_state/` 子目录放会话注册表，
+不参与扫描。
 
 ```yaml
-# cordis.patch.yml
+# cordis.patch.yml（可选：不写就用默认目录）
 # voice-assistant:
 #   config:
 #     routing:
@@ -382,17 +401,29 @@ V1.4 之后按真机反馈收紧了三件事，都不是新功能，而是**把�
 
 ```json
 // <expertDirs>/chem.json —— 丢进目录就是一位新专家
-{ "id": "chem", "label": "小化 · 化学", "description": "分子建模与性质预测。" }
+{
+  "id": "chem",
+  "label": "小化 · 化学",
+  "description": "分子建模与性质预测。",
+  "persona": "你是「小化」，专注化学分析……",
+  "skills": []
+}
 ```
 
-**目录是「追加」而不是「替换」**：只配了目录时，默认四位专家一位不少，目录里
-同 id 的文件会覆盖默认那位（只改 `label` 也行，人格/描述/技能自动继承模板）。
-内联写了 `workers`/`experts` 则是**完整花名册**（严格按你写的来），目录只补新 id。
-V1.7 起目录里的 `{"id":"xxx","disabled":true}` 是**删除墓碑**，会从最终清单剔除
-该 id（管理接口的删除就靠它），这也是删除内置专家能持久生效的原因。
+**四个入口都汇到同一份文件**：语音「新增/删除专家」、`POST/DELETE /experts`、
+手工丢/删 JSON、以及直接编辑 JSON —— 前两者由 `expert-registry.js` 原子写盘，
+后两者由 `expert-manager.js` 的 `fs.watch` 捕获，最终都调 `applyChanges()` 重扫
+并原地更新运行时花名册（约 250ms 内生效，无需重启）。
+
+目录 JSON 是**完整定义**：字段不会与任何内置模板合并，写什么就是什么；`id` 必须
+匹配 `[a-z0-9][a-z0-9_-]{0,63}`，`label` 与 `description` 必填。旧的
+`{"id":"xxx","disabled":true}` 墓碑仍兼容，但删除已改为直接删文件。
+`general` 是系统锚点，目录里写它会被忽略。内联的 `routing.workers` /
+`routing.experts` 只在目录全部不可读时作兼容兜底，不再是配置入口。
 
 技能名写错、JSON 写坏都不会让整层塌掉：坏文件被跳过并记进 `problems`，
-启动日志里逐条可见，`/health.routing.problems` 也能查到。
+启动日志里逐条可见，`/health.routing.problems` 也能查到。目录不存在属正常
+初始态，不报假红。
 
 ### 给专家加技能
 
@@ -703,8 +734,8 @@ dsh plugin --profile web add "$PWD"
       timeoutMs: 10000           # 路由 LLM 超时。**冷启动首调约 6s**，别调到 6s 附近
       jobTimeoutMs: 300000       # 单个委托最长等待（等待人工审批的任务按失败汇报）
       reportPollMs: 1500         # /reports 轮询间隔
-      workers: []                # 内联专家清单（空 = 用内置 4 位；V1.7 起）
-      expertDirs: []             # 专家目录：每个 *.json 一位，丢文件即生效
+      workers: []                # 兼容兜底：仅当 expertDirs 全部不可读时使用
+      expertDirs: []             # 唯一真相源：每个 *.json 一位专家（不配则用默认目录）
     interactions:                # 统一互动流（审批 / 提问 / 汇报按时间播报）
       enabled: true
       announceApprovals: true    # 只播报提醒，**不语音代答**（误听的代价是真实损害）
@@ -1802,7 +1833,7 @@ index.js                    宿主半入口：配置归一化、配置下发、A
 lib/config.js               配置归一化 + 客户端白名单裁剪（含 turn 的夹取与语义保护）
 lib/identity.js             宿主半身份：常驻会话可见性标注 + 全局记忆注册 + **归档自愈**（含「隐藏不可行」证伪表）
 lib/agent.js                常驻 agent：模型路由解析/落盘、**人格段（V1.5 含职责边界）**、**preset 挂载（mountAgentPreset）**、生命周期
-lib/workers.js              worker 专家层：默认四位领域专家（V1.7）、多来源合并（workers/experts/expertDirs + disabled 墓碑）、归一化、批量建立（逐项进度 + 建立/归档自愈双超时）、技能桥
+lib/workers.js              worker 专家层：general 系统锚点、目录 JSON 唯一真相源扫描（含坏文件/墓碑容错）、归一化、批量建立（逐项进度 + 建立/归档自愈双超时）、技能桥
 lib/expert-registry.js      V1.7 专家注册表：id 校验、原子写入（临时文件+rename）、自定义专家增删、删除墓碑
 lib/expert-manager.js       V1.7 专家管理中枢：改文件→重扫→原地更新清单→建/销 agent→注册委托；expertDir 解析
 src/client/core/expert-commands.js V1.7 语音命令规则解析（增删改查 + id 派生 + 播报文案，纯函数）
