@@ -29,10 +29,12 @@ V1.8 已把插件专家系统和 DSH 自带的团队功能彻底隔离：常驻�
 | Node.js | 20+（推荐 22.x） |
 | 浏览器 | Chrome / Edge 等支持 Web Speech API 的现代浏览器 |
 | 麦克风 | 系统已授权浏览器使用（首次点击语音球后浏览器才申请权限） |
-| 网络 | 浏览器 Web Speech 识别依赖境外云端；受限网络下需自备识别后端（见第 8 节） |
+| 网络 | 浏览器 Web Speech 识别依赖境外云端；受限网络下用插件**内置**的识别后端（见第 8 节） |
+| 模型（可选但推荐） | 内置识别需要约 700 MB 磁盘：Whisper small 465 MB + SenseVoice int8 228 MB，由 `npm run setup:asr` 安装；首次可离线从已装插件目录校验后复制 |
 
-插件**无 native 依赖、无运行时 npm 依赖**：`lib/client.js` 由 `build.mjs` 零依赖打成
-classic script。
+V2.1 起识别 runtime 是**随项目入库的 vendored 原生包**（`vendor/node_modules/`，约 23 MB），
+不依赖 DSH profile 是否装了 `dsh-ears` / `voice-input-bundle`。`lib/client.js` 仍由
+`build.mjs` 零依赖打成 classic script。
 
 ---
 
@@ -43,8 +45,13 @@ classic script。
 ```sh
 cd dsh-voice-assistant
 node build.mjs                        # 生成 lib/client.js（首次必做）
+npm run setup:asr                     # 安装内置识别模型（离线可加 --no-download）
 dsh plugin --profile web add "$PWD"   # 把当前目录装进 web profile
 ```
+
+`setup:asr` 把模型装进项目内 `.data/asr/`（可用 `DSH_VOICE_ASR_HOME` 改路径），
+逐文件做字节数 + SHA256 校验；本机若已装 `dsh-ears` / `voice-input-bundle`，
+会优先从它们的模型目录**校验后复制**（不联网）。模型二进制不入库。
 
 `dsh plugin add` 会触发 pnpm 重装；如果用 `link:` 依赖，注意从
 `profiles/web` 到项目根的相对路径层数（通常是 `../../../`）。
@@ -211,7 +218,7 @@ npm run probe:session-cmd -- "<带 token 的 URL>"   # 语音会话命令
 # 1) 取 token（按 mtime 取最新日志里的 token）
 # 2) GET /?token=xxx → 303 + Set-Cookie
 # 3) 带 cookie 访问：/plugins/dsh-voice-assistant/api/health
-#    期望：HTTP 200、version=2.0.0、ok=true、problems=[]
+#    期望：HTTP 200、version=2.1.0、ok=true、problems=[]、asrLocal.native 两项为 true
 ```
 
 ---
@@ -234,9 +241,14 @@ lib/
   report.js  interactions.js 要点汇报队列 / 统一互动流
   skills.js                 专家技能注册
   avatars.js  activities.js 素材白名单路由 / 专家忙闲投影
+  asr/manifest.js            内置识别模型清单（URL/字节/SHA256）与校验
+  asr/runtime.js             内置识别服务（可用性/子进程生命周期/转写）
+  asr/worker.js              SenseVoice / Whisper 推理子进程
 src/client/                  客户端半（状态机/唤醒/采集/TTS/浮层 UI）
 skills/somatic-mutation-report/  内置基因分析技能
 assets/characters/           专家卡通素材（Q 版透明底 PNG）
+vendor/node_modules/         内置识别的 vendored 原生包（随源码入库）
+.data/asr/                   内置识别模型（不入库，npm run setup:asr 安装）
 tests/  tools/               单测 / 冒烟探针 / 会话自检工具
 ```
 
@@ -257,14 +269,14 @@ tests/  tools/               单测 / 冒烟探针 / 会话自检工具
 | 后端 | 说明 |
 |---|---|
 | 浏览器 Web Speech | 零配置，依赖境外云端 |
-| `dsh-ears` 插件 | DSH 生态成熟输入插件，8 个后端（本地 Whisper / 阿里云 / 腾讯云 / Groq 等）；本机已切到 Whisper `small`（465MB） |
-| DSH 官方 SenseVoice（V2.0） | 官方 `voice-input-bundle` 的本地识别：SenseVoice Small（sherpa-onnx ONNX，INT8 228MB，已下载）+ Silero VAD；支持 auto/zh/en/粤/ja/ko |
+| **内置本地 Whisper（V2.1）** | 项目自带 `whisper.node` 原生包 + `ggml-small.bin`（465MB），语言钉死 `zh`；**不需要装 `dsh-ears`** |
+| **内置本地 SenseVoice（V2.1）** | 项目自带 `sherpa-onnx-node` + SenseVoice Small INT8（228MB）+ Silero VAD；支持 auto/zh/en/粤/ja/ko；**不需要装 `voice-input-bundle`** |
 | `http` 自建端点 | 任意 OpenAI 兼容 `/audio/transcriptions`，在 `asr.http` 配置 baseURL/apiKey/model |
 
-### 8.1 在 UI 里选识别方式（V2.0）
+### 8.1 在 UI 里选识别方式（V2.1）
 
 **长按语音球（或右键）打开设置面板 → 「识别方式」下拉**，即可自主切换：
-`自动` / `浏览器识别` / `本地 Whisper（dsh-ears）` / `本地 SenseVoice（官方）` / `上游转写`。
+`自动` / `浏览器识别` / `本地 Whisper（内置）` / `本地 SenseVoice（内置）` / `上游转写`。
 没探测到的引擎会标「（未检测到）」且不可选。选中 SenseVoice 后会多出「识别语言」下拉
 （auto / zh / en / yue / ja / ko）。
 
@@ -272,23 +284,37 @@ tests/  tools/               单测 / 冒烟探针 / 会话自检工具
 - **刷新保留**：选择存在浏览器 `localStorage`（key `xfv:v1:asr-preference`），覆盖
   `cordis.patch.yml` 的 `asr.engine`。想回到配置文件的值，选「自动」即可。
 - **仍有降级**：手动选的引擎运行时失败（如网络不通）照样自动回退到其它可用引擎。
-- 官方 SenseVoice 需要 `voice-input-bundle` 在 profile 里启用（默认已启用）。
+- **两个外部语音插件都不是前置条件**：它们即使完全卸载，内置后端照常工作。
 
-> **当前配置（2026-11-25）**：识别基线是浏览器 Web Speech，`dsh-ears` 本地 Whisper
-> 作为**离线兜底**已启用。网络好时用浏览器识别；网络不通时插件自动降级到本地
-> Whisper（本会话内不切回，避免抖动横跳）。兜底已钉死 `language: zh` 以压制
-> 短片段的语言误判幻觉。
->
-> 模型档位（2026-11-25 升级）：已切到 **`small`（465MB）**，`ggml-tiny.bin`（74MB）
-> 保留作回退。配置在 `~/.dsh/profiles/web/cordis.patch.yml` 的
-> `recognition.localWhisper.model: small`，模型文件在 `%LOCALAPPDATA%\dsh-ears\whisper\`。
-> 模型带 dsh-ears 的 SHA256 校验 + `.dsh-ears-done` 标记，手动拷贝的文件若校验不过
-> 会被判为未下载。验证：`node tools/probe-local-whisper.mjs`（应显示 small 校验通过）。
-> 若要彻底回到"只走浏览器"，把 `~/.dsh/profiles/web/package.json` 的 bundles 去掉
-> `dsh-ears`、并把 `cordis.patch.yml` 里 dsh-ears 段注释掉，再重启 DSH。
+### 8.2 内置后端的配置与排障
+
+档位写在**插件配置**（`cordis.patch.yml` 的 `voice-assistant.config`），不再写 dsh-ears 段：
+
+```yaml
+asr:
+  engine: auto          # auto / webspeech / ears(内置Whisper) / sensevoice(内置) / http
+  local:
+    enabled: true
+    whisperModel: small # tiny / base / small / medium / large / turbo
+    sensevoicePrecision: int8
+    whisperLanguage: zh # 短片段自动语言检测必错，钉死中文
+```
+
+- 模型检查：`GET /plugins/dsh-voice-assistant/api/asr/status`——两项 `available` 都应为 true；
+  `reason` 会明说 `missing` / `size:*` / `sha256-mismatch` / `native-runtime-missing`。
+- 推理验证：`node tools/probe-local-asr.mjs`（不启 DSH）、
+  `node tools/smoke-local-asr-http.mjs`（启 DSH 后）、
+  `node tools/cdp-local-asr-probe.mjs`（真浏览器）。
+- 换模型档位后重跑 `node tools/setup-asr.mjs --model <档位>`；下载器支持 `hf-mirror` 回退。
+- 换平台时按 `vendor/README.md` 替换平台原生包；缺包时状态接口会明确报
+  `native-runtime-missing`，不会静默不可用。
+
+> **当前配置（2026-11-25，V2.1）**：识别基线仍是浏览器 Web Speech；受限网络下
+> `asr-unreachable` → 死名单 → 自动切到内置 Whisper（本会话内不切回，避免抖动横跳）。
+> 两条本地链都在本项目的子进程里跑，模型在 `.data/asr/`，与两个外部插件的安装状态无关。
 
 ---
 
 ## 9. 版本
 
-`2.0.0` · MIT License · 详细变更与历史踩坑见 [README.md](./README.md)。
+`2.1.0` · MIT License · 详细变更与历史踩坑见 [README.md](./README.md)。

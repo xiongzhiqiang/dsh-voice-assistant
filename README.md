@@ -7,12 +7,65 @@
 一个 DSH bundle 插件：宿主半（配置 / 润色 / 路由 / worker 专家 / **专家技能** /
 **委托中枢** / **互动中枢** / 语音代理）+ 客户端半（浮层 / 状态机 / 唤醒 / 播报）。
 
-版本：`2.0.0`（V2.0 = 接入官方 SenseVoice 识别 + UI 自主选择识别方式/语言）。
+版本：`2.1.0`（V2.1 = 识别后端完全内置：自带 SenseVoice / Whisper 的运行时代码、原生包与模型，不再依赖 `voice-input-bundle` 或 `dsh-ears` 安装）。
 
 > **新用户请先看 [INSTALL.md](./INSTALL.md)** —— 独立的安装与使用说明（前置要求、
 > 安装、配置、语音/专家/会话命令、验证、卸载、识别后端）。本 README 偏设计原理与历史踩坑。
 
-## V2.0 的识别升级：接入官方 SenseVoice + UI 自主选择
+## V2.1：语音识别完全自主（不再依赖任何外部语音插件）
+
+V2.0 的两条本地识别链都借住了别人的服务：`sensevoice` 走官方 `voice-input-bundle`
+的 `remote.speech`，`ears` 走 `dsh-ears` 的 `remote.dshEars`。V2.1 把它们**搬进本项目**：
+
+```
+浏览器 MediaRecorder → blobToPcm16Wav(16k/mono/PCM16)
+  → 本插件 HTTP API  /plugins/dsh-voice-assistant/api/asr/local
+  → 本项目子进程 lib/asr/worker.js
+      ├─ vendored sherpa-onnx-node + SenseVoice Small INT8 + Silero VAD
+      └─ vendored whisper.node + ggml-small.bin（语言钉死 zh）
+  → { text } → 润色 → 会话 → 播报
+```
+
+**代码/模型放在哪**
+
+| 内容 | 位置 | 是否入库 |
+|---|---|---|
+| 推理子进程、模型清单、校验、服务 | `lib/asr/`（`manifest.js` / `runtime.js` / `worker.js`） | 是 |
+| 原生运行时（`sherpa-onnx-node` 1.13.8 + win-x64 DLL、`@fugood/whisper.node` 1.1.3 + win32-x64 二进制） | `vendor/node_modules/` | 是（约 23 MB） |
+| 模型（Whisper small 465 MB、SenseVoice int8 228 MB、tokens、Silero VAD 1.8 MB） | `.data/asr/` | 否（几百 MB） |
+| 模型安装器 | `tools/setup-asr.mjs` / `npm run setup:asr` | 是 |
+
+模型清单的 URL / 字节数 / SHA256 逐字抄自两个原插件；安装器优先从本机已有目录
+**校验后复制**，也可联网从 HuggingFace（hf-mirror 回退）下载。缺字节或哈希不符
+一律判不可用，绝不"放个同名文件就算装好"。跨平台需换 `vendor/node_modules` 下的
+平台包（见 `vendor/README.md`）。
+
+**识别链路怎么走**
+
+- 客户端 `probeSpeech()` / `probeEars()` **先问** `/asr/status`；内置可用就把
+  `via` 标成 `local`，之后整条识别链只打本插件 API，**完全不读** `remote.speech`
+  / `remote.dshEars`。官方 remote 只在内置不可用时作旧装配兼容兜底。
+- 每个引擎一个独立子进程（native 同步推理不能放宿主进程），同引擎请求串行、
+  不同引擎并行；进程崩溃后下一条请求自动重启。
+- `health` 的 `asrLocal` 字段报档位与原生包路径；`/asr/status` 才做模型哈希校验，
+  避免每次 health 都哈希几百 MB。
+- 配置在插件自己的 `asr.local`：`enabled`、`whisperModel`（默认 `small`）、
+  `sensevoicePrecision`（默认 `int8`）、`whisperLanguage`（默认 `zh`，短片段自动
+  语言检测必错）。设置面板的选项文案已改为「内置」，引擎值沿用旧名以兼容已存偏好。
+
+**验证**
+
+```bash
+npm run setup:asr                 # 安装/校验模型（不联网加 --no-download）
+node tools/probe-local-asr.mjs   # 不启 DSH，直接验两条 native 推理链
+node tools/smoke-local-asr-http.mjs  # 启 DSH 后验 HTTP API + health
+node tools/cdp-local-asr-probe.mjs   # 真浏览器验 UI 与 via=local
+```
+
+以下 V2.0/V1.x 章节保留为设计历史；其中"接官方 bundle / dsh-ears"的描述
+只适用于旧版本，现行实现以本节为准。
+
+## V2.0 的识别升级：接入官方 SenseVoice + UI 自主选择（历史）
 
 V2.0 做了两件事：把 DSH 官方 `voice-input-bundle` 的识别能力接进来，并在设置面板
 里让用户自己选识别方式和语言（此前只能在 `cordis.patch.yml` 里改 `asr.engine`）。

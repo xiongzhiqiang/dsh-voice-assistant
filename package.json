@@ -1,6 +1,6 @@
 {
 	"name": "dsh-voice-assistant",
-	"version": "2.0.0",
+	"version": "2.1.0",
 	"description": "「小凤」always-on voice assistant for DeepSeek Harness: wake-word standby, speech transcription with LLM polish, voice-driven multi-turn session dialogue, spoken replies, and a 60s idle-sleep cycle that wakes on a chime or an incoming agent message.",
 	"type": "module",
 	"main": "index.js",
@@ -48,14 +48,18 @@
 		"lib/",
 		"skills/",
 		"assets/",
+		"vendor/",
+		"tools/setup-asr.mjs",
 		"cordis.patch.yml",
-		"README.md"
+		"README.md",
+		"INSTALL.md"
 	],
 	"scripts": {
 		"build": "node build.mjs",
 		"check": "node build.mjs --check",
-		"test": "node --test tests/host.test.mjs tests/experts.test.mjs tests/client-core.test.mjs tests/questions.test.mjs tests/visuals.test.mjs tests/expert-management.test.mjs tests/expert-sessions.test.mjs tests/asr-preference.test.mjs",
+		"test": "node --test tests/host.test.mjs tests/experts.test.mjs tests/client-core.test.mjs tests/questions.test.mjs tests/visuals.test.mjs tests/expert-management.test.mjs tests/expert-sessions.test.mjs tests/asr-preference.test.mjs tests/local-asr.test.mjs",
 		"check:sessions": "node tools/check-session-integrity.mjs",
+		"setup:asr": "node tools/setup-asr.mjs",
 		"verify": "node tools/check-session-integrity.mjs && node tools/smoke-host.mjs && node tools/smoke-agent-route.mjs",
 		"probe:ledger": "node tools/cdp-ledger-probe.mjs",
 		"probe:delegation": "node tools/smoke-delegation-http.mjs",

@@ -26,13 +26,17 @@
  * 只收 WAV；而浏览器 `MediaRecorder` 产出 webm/opus。所以和本地 Whisper 一样，
  * 发送前必须归一化（责任在调用方）。
  *
- * ## 探测必须便宜且可失败
+ * ## V2.1：内置实现优先，官方插件只作兼容兜底
  *
- * `catalog()` 只读本地 provider 清单，不打网络。取不到就静默判"不可用"，
- * 让主链路降级到其它引擎 —— 一个可选依赖不该让语音助手崩掉。
+ * 探测先问本插件自己的 `/asr/status`（内置 SenseVoice + vendored native +
+ * 项目自有模型）。它通就**完全不碰** `remote.speech`，所以系统没装
+ * `voice-input-bundle` 也能自主识别。只有内置不可用（例如旧宿主半、
+ * 模型没装）时才退回官方 remote —— 这条兜底只为兼容旧装配。
+ *
+ * `via` 字段把"这次到底走哪条"显式交给调用方，避免探测与识别各猜一次。
  */
 import { blobToPcm16Wav } from "../audio/wav.js";
-import { warn } from "../runtime.js";
+import { asrStatus, asrTranscribe, warn } from "../runtime.js";
 
 /**
  * 按优先级列出 `speech` 命名空间的所有可能取法（不筛方法）。
@@ -126,8 +130,29 @@ export async function probeSpeech(ctx) {
 		hasCatalog: typeof value?.catalog === "function",
 		...(error === undefined ? {} : { error }),
 	}));
+
+	// ① V2.1 内置实现（首选）：走本插件 API，不依赖任何外部插件。
+	try {
+		const status = await asrStatus();
+		if (status?.sensevoice?.available === true) {
+			return {
+				available: true,
+				providers: [{ id: "sensevoice-local", label: status.sensevoice.model }],
+				languages: SPEECH_LANGUAGES.slice(),
+				selection: { id: "sensevoice-local", languages: SPEECH_LANGUAGES.slice() },
+				paths: [{ from: "local-asr-api", hit: true, precision: status.sensevoice.precision }],
+				via: "local",
+			};
+		}
+		// 内置不可用不直接放弃：下面还有官方 remote 兜底。
+		paths.unshift({ from: "local-asr-api", hit: false, reason: status?.sensevoice?.reason ?? "unknown" });
+	} catch (error) {
+		paths.unshift({ from: "local-asr-api", hit: false, reason: String(error?.message ?? error) });
+	}
+
+	// ② 官方 remote 兜底（只在内置不可用时用；旧装配兼容）。
 	const namespace = speechNamespace(ctx);
-	if (namespace === null) return { available: false, providers: [], languages: [], selection: null, paths };
+	if (namespace === null) return { available: false, providers: [], languages: [], selection: null, paths, via: "remote" };
 	try {
 		let catalog = null;
 		if (typeof namespace.catalog === "function") catalog = unwrap(await namespace.catalog());
@@ -139,10 +164,10 @@ export async function probeSpeech(ctx) {
 				: SPEECH_LANGUAGES.slice();
 		// 有 transcribe 就认为可用（catalog 可能因为版本差异形状不同）。
 		const available = typeof namespace.transcribe === "function";
-		return { available, providers, languages, selection: catalog?.selection ?? null, paths };
+		return { available, providers, languages, selection: catalog?.selection ?? null, paths, via: "remote" };
 	} catch (error) {
 		warn("speech 识别探测失败，跳过该引擎", error?.message ?? error);
-		return { available: false, providers: [], languages: [], selection: null, paths };
+		return { available: false, providers: [], languages: [], selection: null, paths, via: "remote" };
 	}
 }
 
@@ -150,12 +175,26 @@ export async function probeSpeech(ctx) {
  * 构造一个走 DSH 官方 speech 识别的 `recognize` 函数。
  *
  * @param ctx - 客户端 Cordis 上下文。
- * @param options - `{ language? }`：语言提示（auto/zh/en/yue/ja/ko）。
+ * @param options - `{ language?, via? }`：`via:'local'` 走本项目内置实现，否则走官方 remote。
  * @returns `(blob) => Promise<string>`。
  */
 export function makeSpeechRecognizer(ctx, options = {}) {
 	const language = typeof options.language === "string" && options.language !== "" ? options.language : "auto";
+	const via = options.via === "local" ? "local" : "remote";
 	return async (blob) => {
+		// V2.1：内置链 —— 归一化 WAV 后 POST 给本插件 API，全程不依赖 remote.speech。
+		if (via === "local") {
+			let payload;
+			try {
+				payload = (await blobToPcm16Wav(blob)).blob;
+			} catch (error) {
+				throw new Error(`asr-audio-format: ${error?.message ?? error}`);
+			}
+			const audioBase64 = await blobToBase64(payload);
+			const result = await asrTranscribe("sensevoice", audioBase64, language);
+			if (typeof result?.text === "string") return result.text;
+			return "";
+		}
 		const namespace = speechNamespace(ctx);
 		if (namespace === null) throw new Error("speech-unavailable");
 

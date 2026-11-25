@@ -104,8 +104,8 @@ export function engineOptions(availability = {}) {
 	return [
 		{ value: "auto", label: "自动（推荐）", available: true },
 		{ value: "webspeech", label: "浏览器识别", available: true },
-		{ value: "ears", label: "本地 Whisper（dsh-ears）", available: yes("ears") },
-		{ value: "sensevoice", label: "本地 SenseVoice（官方）", available: yes("sensevoice") },
+		{ value: "ears", label: "本地 Whisper（内置）", available: yes("ears") },
+		{ value: "sensevoice", label: "本地 SenseVoice（内置）", available: yes("sensevoice") },
 		{ value: "http", label: "上游转写", available: yes("http") },
 	];
 }

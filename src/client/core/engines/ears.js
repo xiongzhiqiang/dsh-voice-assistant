@@ -46,7 +46,7 @@
  * 保证"它自己的录音按钮能用"⇔"我们发出去的也能用"。
  */
 import { blobToPcm16Wav } from "../audio/wav.js";
-import { warn } from "../runtime.js";
+import { asrStatus, asrTranscribe, warn } from "../runtime.js";
 
 /**
  * 取 dsh-ears 的远程命名空间。
@@ -301,24 +301,44 @@ export async function probeEars(ctx) {
 		...(error === undefined ? {} : { error }),
 	}));
 	const shape = earsContextShape(ctx);
+
+	// V2.1：先问本插件自己的内置 Whisper（项目自有模型 + vendored native）。
+	// 它通就完全不碰 remote.dshEars —— 没装 dsh-ears 也能离线识别。
+	try {
+		const status = await asrStatus();
+		if (status?.whisper?.available === true) {
+			return {
+				available: true,
+				backends: [{ id: "local-whisper", label: `Whisper ${status.whisper.model}`, ready: true }],
+				needsWav: true,
+				paths: [{ from: "local-asr-api", hit: true, model: status.whisper.model }],
+				shape,
+				via: "local",
+			};
+		}
+		paths.unshift({ from: "local-asr-api", hit: false, reason: status?.whisper?.reason ?? "unknown" });
+	} catch (error) {
+		paths.unshift({ from: "local-asr-api", hit: false, reason: String(error?.message ?? error) });
+	}
+
 	const namespace = earsNamespace(ctx);
-	if (namespace === null) return { available: false, backends: [], needsWav: false, paths, shape };
+	if (namespace === null) return { available: false, backends: [], needsWav: false, paths, shape, via: "remote" };
 	try {
 		// 顺带把"要不要转 WAV"问出来：探测本来就只跑一次，
 		// 让每次录音都去远程问一遍设置纯属浪费。
 		const needsWav = await resolveNeedsWav(namespace);
 		if (typeof namespace.listAsrBackends !== "function") {
 			// 没有 list 方法但能 transcribe：仍认为可用（版本差异）。
-			return { available: true, backends: [], needsWav, paths, shape };
+			return { available: true, backends: [], needsWav, paths, shape, via: "remote" };
 		}
 		const backends = unwrap(await namespace.listAsrBackends());
 		const list = Array.isArray(backends) ? backends : [];
 		// 只要列表里存在「就绪」的后端就算可用；字段名跨版本可能是 ready / available。
 		const ready = list.filter((item) => item?.ready === true || item?.available === true);
-		return { available: list.length === 0 ? true : ready.length > 0, backends: list, needsWav, paths, shape };
+		return { available: list.length === 0 ? true : ready.length > 0, backends: list, needsWav, paths, shape, via: "remote" };
 	} catch (error) {
 		warn("dsh-ears 探测失败，改用浏览器识别", error?.message ?? error);
-		return { available: false, backends: [], needsWav: false, paths, shape };
+		return { available: false, backends: [], needsWav: false, paths, shape, via: "remote" };
 	}
 }
 
@@ -326,13 +346,27 @@ export async function probeEars(ctx) {
  * 构造一个走 dsh-ears 的 `recognize` 函数。
  *
  * @param ctx - 客户端 Cordis 上下文。
- * @param options - `{ needsWav? }`：返回"当前后端是否要 WAV"的函数。
- *   传函数而不是布尔值，是因为用户可能在会话中途去 dsh-ears 设置页改后端。
+ * @param options - `{ needsWav?, via? }`：`via:'local'` 走本项目内置 Whisper；
+ *   `needsWav` 返回"当前后端是否要 WAV"（用户可能中途换后端）。
  * @returns `(blob, language) => Promise<string>`。
  */
 export function makeEarsRecognizer(ctx, options = {}) {
 	const shouldConvert = options.needsWav ?? (() => false);
+	const via = options.via === "local" ? "local" : "remote";
 	return async (blob) => {
+		// V2.1 内置链：Whisper 只吃 16k 单声道 PCM16 WAV，必须归一化。
+		if (via === "local") {
+			let payload;
+			try {
+				payload = (await blobToPcm16Wav(blob)).blob;
+			} catch (error) {
+				throw new Error(`asr-audio-format: ${error?.message ?? error}`);
+			}
+			const audioBase64 = await blobToBase64(payload);
+			const result = await asrTranscribe("whisper", audioBase64, "zh");
+			if (typeof result?.text === "string") return result.text;
+			return "";
+		}
 		const namespace = earsNamespace(ctx);
 		if (namespace === null) throw new Error("ears-unavailable");
 

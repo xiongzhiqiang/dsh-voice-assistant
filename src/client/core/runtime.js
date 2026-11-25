@@ -143,6 +143,34 @@ export async function route(text) {
 }
 
 /**
+ * V2.1：探测本项目内置识别后端（SenseVoice / Whisper）是否就绪。
+ *
+ * 不依赖任何 DSH 插件是否安装 —— 这是插件自己的 HTTP API。
+ * @returns `{ ok, enabled, sensevoice, whisper, dataRoot }`；不可用时抛错由调用方吞。
+ */
+export async function asrStatus() {
+	const response = await request("/asr/status", { method: "GET" });
+	return response.json();
+}
+
+/**
+ * V2.1：把归一化后的 16 kHz PCM16 WAV 交给本项目内置识别。
+ *
+ * @param engine - `sensevoice` / `whisper`。
+ * @param audioBase64 - 纯 base64（不含 data URI 前缀）。
+ * @param language - 语言提示。
+ * @returns `{ text, via, engine }`。
+ */
+export async function asrTranscribe(engine, audioBase64, language = "auto") {
+	const response = await request("/asr/local", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ engine, audioBase64, language }),
+	});
+	return response.json();
+}
+
+/**
  * V1.3：把任务委托给 worker 后台执行（当场返回，不切会话）。
  * @param worker - worker id。
  * @param task - 路由改写后的任务文本。

@@ -1066,7 +1066,7 @@ await (async () => {
 		check("文案：不再原样抛 speech-network", text.includes("speech-network"), false);
 		check("文案：说明了是「连不上识别服务」", text.includes("连不上识别服务"), true);
 		check("文案：点明它依赖境外云端（用户才知道为什么）", text.includes("境外云端"), true);
-		check("文案：给出了下一步（dsh-ears 或上游端点）", text.includes("dsh-ears") && text.includes("上游 ASR"), true);
+		check("文案：给出了下一步（内置本地识别或上游端点）", text.includes("内置本地识别") && text.includes("上游 ASR"), true);
 		check("文案：按 error 级别（用户必须看得见）", notices.at(-1)?.[1], "error");
 		check("死引擎：已记进名单（回退时跳过它）", controller.deadEngines.has("webspeech"), true);
 		controller.dispose();

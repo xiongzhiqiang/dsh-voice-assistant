@@ -498,7 +498,8 @@ function renderPanel(controller, snapshot, onClose) {
 		"webspeech-fallback": "浏览器识别（已降级）",
 		http: "上游转写",
 		"http-fallback": "上游转写（已降级）",
-		ears: "dsh-ears 转写",
+		ears: "内置本地 Whisper",
+		sensevoice: "内置本地 SenseVoice",
 		none: "无可用引擎",
 	}[snapshot.engine] ?? snapshot.engine;
 

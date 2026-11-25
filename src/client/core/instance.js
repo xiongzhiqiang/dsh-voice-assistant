@@ -12,6 +12,8 @@
  * 会直接不渲染，不会访问到已释放的引擎。
  */
 
+import { asrStatus } from "./runtime.js";
+
 /** 当前控制器。 */
 let current = null;
 
@@ -174,6 +176,7 @@ export function setController(controller) {
 			 */
 			ears: () => ({
 				available: controller.earsAvailable,
+				via: controller.earsVia,
 				needsWav: controller.earsNeedsWav === true,
 				backends: controller.earsBackends ?? [],
 				// 各条取法的命中情况：命名空间取不到时靠它定位方向。
@@ -189,9 +192,21 @@ export function setController(controller) {
 		 */
 		speech: () => ({
 			available: controller.speechAvailable === true,
+			via: controller.speechVia,
 			languages: Array.isArray(controller.speechLanguages) ? controller.speechLanguages.slice() : [],
 			paths: Array.isArray(controller.speechPaths) ? controller.speechPaths : [],
 		}),
+		/**
+		 * V2.1：直接问本插件的内置识别 API（绕过 remote 探测），供真机断言
+		 * "两个外部插件都没装时，识别仍然可用"。
+		 */
+		localAsr: async () => {
+			try {
+				return await asrStatus();
+			} catch (error) {
+				return { available: false, error: String(error?.message ?? error) };
+			}
+		},
 		/** 当前 ASR 偏好与生效引擎（真机验证 UI 选择持久化用）。 */
 		asr: () => ({
 			preference: controller.asrPreference ?? null,

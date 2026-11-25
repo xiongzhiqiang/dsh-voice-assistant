@@ -84,7 +84,11 @@
         agent:
           enabled: true
           # 稳定标识：首次用它创建，重启后用它 resume，记忆不断。
-          sessionId: 'session-voice-assistant-root'
+          # V1.8：换成 -v2 —— 旧 root 会话里残留 DSH 原生智能体团队
+          # （team/task + subagent/catalog 三位 spawn 子智能体），与插件专家系统
+          # 混在一起。新 id 让常驻助手在干净会话里全新启动；旧会话已由
+          # tools/backup-team-sessions.mjs 移出 sessions/ 备份（不删除）。
+          sessionId: 'session-voice-assistant-root-v2'
           # 助手的工作目录（工具落地处）；留空 = 取第一个工作区，再退到主目录。
           cwd: ''
           # true = 跨重启保留记忆（依赖 sessionPersistence）
@@ -104,18 +108,19 @@
         # 识别引擎给的是一段段**片段**（约 1 秒静音就切一段，粒度是给字幕用的），
         # 片段不等于"说完了"。这里决定片段攒到什么时候才提交给模型。
         turn:
-          # 声音停止多久 = 这一轮说完了。默认 10 秒。
+          # 声音停止多久 = 这一轮说完了。默认 5 秒。
           #   太长：每轮都要干等这么久才得到回应；太短：还没说完就被提交（只回了半句）。
-          # 取 10 秒的依据：人说话的句中停顿（想词、换气、列举）一般 2–5 秒，
-          # 10 秒能稳稳跨过；再往上加只是纯等待，边际收益为零。
-          # 下界 3s、上界 10min（越界会被自动夹取）。
+          # 当前取 5 秒（2026-11-19 按用户要求从 10 秒调小）：人说话的句中停顿
+          # （想词、换气）一般 2–5 秒，5 秒仍能跨过多数停顿，但等待感明显变短。
+          # 若发现"话说到一半被提交"，单击语音球可立即提交已攒内容；
+          # 想放宽就调大这个值。下界 3s、上界 10min（越界会被自动夹取）。
           # 等不及的时候：**单击语音球**立即提交，不必干等。
           #
           # ⚠️ 这个值必须与 `core/constants.js` 的 `SILENCE_SUBMIT_MS`、
           # `lib/config.js` 的默认值、`README.md` 与三套测试**保持一致**，
           # 否则会出现"代码默认 10s、实机跑 5s"的幽灵差异
           # （`smoke-turn-gate` 有一条断言专门钉这个一致性）。
-          silenceMs: 10000
+          silenceMs: 5000
           # 单轮硬上限：连续不断说话时的安全阀，到点无论如何提交一次。
           # 必须大于 silenceMs（小于会被自动抬到 silenceMs + 5s）。
           maxTurnMs: 300000
@@ -184,3 +189,6 @@
           position: 'bottom-right'
           accent: '#2f6bff'
           showTranscript: true
+        routing:
+          expertDirs:
+            - C:\Users\xqz19\.dsh\voice-assistant\experts

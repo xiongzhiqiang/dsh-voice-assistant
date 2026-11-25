@@ -306,6 +306,8 @@ export class VoiceController {
 		 * 前者可以试，后者不该再试。
 		 */
 		this.earsAvailable = null;
+		/** V2.1：`ears`（本地 Whisper）这次探测走的是项目内置实现还是旧 remote 兜底。 */
+		this.earsVia = "remote";
 		/**
 		 * dsh-ears 当前后端是否要求**浏览器归一化后的 16 kHz PCM16 WAV**。
 		 *
@@ -337,6 +339,8 @@ export class VoiceController {
 		 * 与 dsh-ears 同为可选依赖：探测失败就标不可用，不影响其它引擎。
 		 */
 		this.speechAvailable = null;
+		/** V2.1：`sensevoice` 这次探测走的是项目内置实现还是旧 remote 兜底。 */
+		this.speechVia = "remote";
 		this.speechLanguages = SPEECH_LANGUAGES.slice();
 		this.speechPaths = [];
 
@@ -479,6 +483,7 @@ export class VoiceController {
 		const probe = await probeEars(this.ctx);
 		if (this.disposed) return;
 		this.earsAvailable = probe.available === true;
+		this.earsVia = probe.via === "local" ? "local" : "remote";
 		this.earsNeedsWav = probe.needsWav === true;
 		this.earsBackends = Array.isArray(probe.backends) ? probe.backends : [];
 		this.earsPaths = Array.isArray(probe.paths) ? probe.paths : [];
@@ -504,8 +509,8 @@ export class VoiceController {
 				const actual = this.snapshot.engine;
 				this.notice(
 					actual === "none"
-						? "没有检测到可用的 dsh-ears 识别后端，且没有其它可用引擎。请在设置里配置 ASR。"
-						: `没有检测到可用的 dsh-ears 识别后端，已退回「${this.engineLabel(actual)}」。`,
+						? "没有检测到可用的本地 Whisper 识别后端，且没有其它可用引擎。请在设置里配置 ASR。"
+						: `没有检测到可用的本地 Whisper 识别后端，已退回「${this.engineLabel(actual)}」。`,
 					"warn",
 				);
 			}
@@ -561,6 +566,7 @@ export class VoiceController {
 		const probe = await probeSpeech(this.ctx);
 		if (this.disposed) return;
 		this.speechAvailable = probe.available === true;
+		this.speechVia = probe.via === "local" ? "local" : "remote";
 		if (Array.isArray(probe.languages) && probe.languages.length > 0) this.speechLanguages = probe.languages.slice();
 		this.speechPaths = Array.isArray(probe.paths) ? probe.paths : [];
 		// 广播一次，让设置面板的可用性标记 / 语言下拉刷新（纯字段变更不会重渲染）。
@@ -575,8 +581,8 @@ export class VoiceController {
 				const actual = this.snapshot.engine;
 				this.notice(
 					actual === "none"
-						? "没有检测到 DSH 官方语音识别（SenseVoice），且没有其它可用引擎。"
-						: `没有检测到 DSH 官方语音识别（SenseVoice），已退回「${this.engineLabel(actual)}」。`,
+						? "没有检测到内置 SenseVoice 识别，且没有其它可用引擎。"
+						: `没有检测到内置 SenseVoice 识别，已退回「${this.engineLabel(actual)}」。`,
 					"warn",
 				);
 			}
@@ -737,14 +743,17 @@ export class VoiceController {
 			// 复用 dsh-ears 的远程 transcribe：VAD 采集在本插件，识别在它那边。
 			// `needsWav` 传函数而不是布尔值 —— 用户可能在会话中途去
 			// dsh-ears 设置页换后端（例如从云端换成本地 Whisper）。
-			return new HttpAsrEngine({ ...handlers(), recognize: makeEarsRecognizer(this.ctx, { needsWav: () => this.earsNeedsWav }) });
+			return new HttpAsrEngine({
+				...handlers(),
+				recognize: makeEarsRecognizer(this.ctx, { needsWav: () => this.earsNeedsWav, via: this.earsVia }),
+			});
 		}
 		if (name === "sensevoice") {
 			// DSH 官方语音输入：remote `speech` → SenseVoice 本地识别。
 			// 宿主侧 validateWave 只收 WAV，识别器内部会做归一化。
 			return new HttpAsrEngine({
 				...handlers(),
-				recognize: makeSpeechRecognizer(this.ctx, { language: this.asrPreference.language }),
+				recognize: makeSpeechRecognizer(this.ctx, { language: this.asrPreference.language, via: this.speechVia }),
 			});
 		}
 		if (name === "http" || name === "http-fallback") return new HttpAsrEngine(handlers());
@@ -2218,7 +2227,7 @@ export class VoiceController {
 			this.notice(
 				switched
 					? `浏览器识别连不上识别服务（它依赖境外云端）。已自动改用「${this.engineLabel(this.snapshot.engine)}」。`
-					: "浏览器识别连不上识别服务（它依赖境外云端）。请在设置里改用 dsh-ears 或上游 ASR 端点。",
+					: "浏览器识别连不上识别服务（它依赖境外云端）。请在设置里改用内置本地识别或上游 ASR 端点。",
 				"error",
 			);
 			return;
@@ -2236,8 +2245,8 @@ export class VoiceController {
 				"webspeech-fallback": "浏览器识别（已降级）",
 				http: "上游转写",
 				"http-fallback": "上游转写（已降级）",
-				ears: "dsh-ears 转写",
-				sensevoice: "本地 SenseVoice（官方）",
+				ears: "内置本地 Whisper",
+				sensevoice: "内置本地 SenseVoice",
 				none: "无可用引擎",
 			}[name] ?? name
 		);

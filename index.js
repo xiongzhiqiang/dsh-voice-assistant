@@ -44,6 +44,7 @@ import { createExpertSessionStore } from "./lib/expert-sessions.js";
 import { createSessionManager } from "./lib/session-manager.js";
 import { labelAgentSession, registerGlobalMemory, ensureSessionNotArchived } from "./lib/identity.js";
 import { PLUGIN_VERSION } from "./lib/version.js";
+import { createLocalAsr } from "./lib/asr/runtime.js";
 
 /** 插件名（fiber 诊断与日志前缀）。 */
 export const name = "dsh-voice-assistant";
@@ -80,6 +81,14 @@ function summarizeSessions(all) {
  */
 export function apply(ctx, config = {}) {
 	const normalized = normalizeConfig(config);
+
+	/**
+	 * V2.1：自包含本地识别服务。模型与原生包都在本项目内（vendor/ + .data/asr/），
+	 * 不再依赖 dsh-ears / voice-input-bundle 是否安装。推理是懒启动的，
+	 * 这里只建对象、不加载 addon，所以不影响 DSH 启动耗时。
+	 */
+	const localAsr = createLocalAsr(normalized, ctx.logger);
+	ctx.effect(() => () => localAsr.dispose(), "voice-assistant: 内置识别服务生命周期");
 
 	/**
 	 * 专家技能目录（需求①）：一次性扫盘，把"专家会做什么"查清楚。
@@ -243,9 +252,12 @@ export function apply(ctx, config = {}) {
 			delegation: delegation.state(),
 			/** V1.8 专家会话注册表（每专家的会话列表 + 活跃会话 + 摘要条数）。 */
 			sessions: sessionStore ? summarizeSessions(sessionStore.list()) : {},
+			/** V2.1 内置识别：静态自省（模型是否校验通过走 /asr/status，避免 health 里哈希几百 MB）。 */
+			asrLocal: localAsr.state(),
 			capabilities: {
 				polishAvailable: typeof llm?.stream === "function" && polishModel !== "",
 				polishModel,
+				localAsrEnabled: normalized.asr.local.enabled,
 				asrHttpReady: normalized.asr.http.baseURL !== "",
 				ttsHttpReady: normalized.tts.http.baseURL !== "",
 				agentAvailable: agentRef !== null,
@@ -524,7 +536,7 @@ export function apply(ctx, config = {}) {
 		// 2) 本机 API。注册失败（前缀冲突）只告警：语音球仍能工作，
 		//    只是润色退化为规则清理、上游 ASR/TTS 不可用。
 		try {
-			const dispose = installApiRoutes(scope, normalized, state, delegation, interactions, expertManager, sessionManager);
+			const dispose = installApiRoutes(scope, normalized, state, delegation, interactions, expertManager, sessionManager, localAsr);
 			scope.effect(() => dispose, "voice-assistant: 本机 API");
 		} catch (error) {
 			scope.logger?.warn?.(`voice-assistant: API 路由注册失败，将退化为纯浏览器语音链路 —— ${error?.message ?? error}`);

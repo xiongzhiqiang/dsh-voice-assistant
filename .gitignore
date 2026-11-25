@@ -29,8 +29,17 @@ tools/_session_backup/
 
 # ── 依赖 / 系统文件 ──────────────────────────────────────
 node_modules/
+# V2.1：vendor/node_modules 是随项目入库的内置识别运行时（sherpa-onnx / whisper.node），
+# 必须显式解除上面的通用忽略，否则打包安装后内置识别全失效。
+!vendor/node_modules/
 Thumbs.db
 desktop.ini
+
+# ── V2.1 内置识别模型（几百 MB 二进制，由 npm run setup:asr 安装）────
+.data/
+_native-inventory.json
+_disk.json
+_vendor-check.txt
 
 # 注意：以下文件**必须入库**，不要误加排除：
 #   lib/client.js            —— 构建产物，但 package.json "./client" 指向它，运行时必需
