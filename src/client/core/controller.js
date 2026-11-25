@@ -83,6 +83,25 @@ export class VoiceController {
 		this.config = options.config;
 		this.fromHost = options.fromHost === true;
 
+		/**
+		 * 用户在 UI 里选的 ASR 偏好（`{ engine, language, manual }`）。
+		 *
+		 * `manual=true` 表示用户明确选过 —— 这一选择**优先于配置文件**，
+		 * 刷新后从 localStorage 恢复。但"自动降级链"仍在：手动选的引擎若
+		 * 运行时失败，照样按死名单回退到其它可用引擎（见 fail()）。
+		 *
+		 * ⚠️ 必须在 `createEngine()` 之前读：配置若强制 `sensevoice`，
+		 * 引擎构造时就要取 `asrPreference.language`。曾在 V2.1 把它放在
+		 * 构造函数末尾，结果首帧 `this.asrPreference` 还是 undefined，
+		 * `Cannot read properties of undefined (reading 'language')`
+		 * 直接让整个语音球装配失败（界面上看就是"卡通不见了"）。
+		 */
+		this.asrPreference = readPreference();
+		if (this.asrPreference.manual === true) {
+			// 用户选过 sensevoice 时语言一并带过来；其它引擎语言不影响。
+			this.config = { ...this.config, asr: { ...this.config.asr, engine: this.asrPreference.engine } };
+		}
+
 		this.machine = new VoiceMachine(STATES.OFF);
 		this.listeners = new Set();
 		this.generation = 0;
@@ -345,18 +364,6 @@ export class VoiceController {
 		this.speechPaths = [];
 
 		/**
-		 * 用户在 UI 里选的 ASR 偏好（`{ engine, language, manual }`）。
-		 *
-		 * `manual=true` 表示用户明确选过 —— 这一选择**优先于配置文件**，
-		 * 刷新后从 localStorage 恢复。但"自动降级链"仍在：手动选的引擎若
-		 * 运行时失败，照样按死名单回退到其它可用引擎（见 fail()）。
-		 */
-		this.asrPreference = readPreference();
-		if (this.asrPreference.manual === true) {
-			// 用户选过 sensevoice 时语言一并带过来；其它引擎语言不影响。
-			this.config = { ...this.config, asr: { ...this.config.asr, engine: this.asrPreference.engine } };
-		}
-		/**
 		 * 是否处于"刚唤醒、还没听到第一句话"。
 		 *
 		 * 决定 `armIdle()` 用哪个时限：等第一句用 `WAKE_GRACE_MS`（短），
@@ -478,8 +485,12 @@ export class VoiceController {
 	async detectEars(options = {}) {
 		if (this.disposed) return;
 		const preferred = this.config.asr.engine;
-		if (preferred !== "auto" && preferred !== "ears") return;
-
+		// V2.1：两个后端都已内置，探测成本只是一次本地 GET，且 UI 的
+		// Whisper 选项可用性**必须**如实显示（用户要能自主切换）。
+		// 旧版这里按 `preferred` 门控，配置固定 sensevoice 时 Whisper
+		// 永远探不到 → UI 标「未检测到」，明明模型就在项目里。
+		// 探测与"是否切过去"是两件事：下面的 forced/webspeech 判据负责
+		// 不抢引擎，这里只管把可用性查清楚。
 		const probe = await probeEars(this.ctx);
 		if (this.disposed) return;
 		this.earsAvailable = probe.available === true;
@@ -539,6 +550,13 @@ export class VoiceController {
 		// 这样两条都不丢：**网络可用时用更准的浏览器识别；受限网络下仍会
 		// 自动退到本地 Whisper**（`asr-unreachable` → 死名单 → 回退）。
 		const forced = preferred === "ears";
+		// 探测无条件做（UI 要如实标注可用性），但**切换**必须尊重偏好：
+		// 用户选了 sensevoice / webspeech / http 时，本地 Whisper 再可用
+		// 也只记 availability，绝不顶掉他选的引擎。
+		if (preferred !== "auto" && !forced) {
+			log(`当前偏好 ${preferred}，只记录 Whisper 可用性，不切换引擎`);
+			return;
+		}
 		if (!forced && this.snapshot.engine !== "ears" && this.engineUsable("webspeech")) {
 			log("浏览器识别可用（auto 模式优先），不切到 dsh-ears");
 			return;
@@ -559,10 +577,9 @@ export class VoiceController {
 	async detectSpeech(options = {}) {
 		if (this.disposed) return;
 		const preferred = this.config.asr.engine;
-		// 只有关心 sensevoice 时才需要探测：auto 也可以在浏览器识别挂掉后
-		// 把它当作候选，所以 auto 同样探。
-		if (preferred !== "auto" && preferred !== "sensevoice") return;
-
+		// 与 detectEars 同理（V2.1）：内置后端的可用性必须无条件探测，
+		// UI 才能如实标注两个选项；切引擎仍由下面的回退判据与
+		// selectAsr() 决定，探测本身不会抢麦克风。
 		const probe = await probeSpeech(this.ctx);
 		if (this.disposed) return;
 		this.speechAvailable = probe.available === true;
@@ -594,8 +611,8 @@ export class VoiceController {
 	 */
 	async watchSpeech() {
 		if (this.disposed) return;
-		const preferred = this.config.asr.engine;
-		if (preferred !== "auto" && preferred !== "sensevoice") return;
+		// V2.1：内置 API 无外部服务依赖，任何偏好下都允许重探，
+		// 避免首探过早失败后 UI 永久标「未检测到」。切换由 detectSpeech 守门。
 		if (this.speechAvailable === true) return;
 
 		try {
@@ -684,31 +701,32 @@ export class VoiceController {
 	 */
 	async watchEars() {
 		if (this.disposed) return;
-		const preferred = this.config.asr.engine;
-		if (preferred !== "auto" && preferred !== "ears") return;
+		// V2.1：同上——任何偏好下都允许重探 Whisper 可用性（UI 要如实标注）。
+		// 是否切到 ears 由 detectEars 里的 preferred 判据守住，这里只催探测。
 		if (this.snapshot.engine === "ears") return;
 		const started = Date.now();
 
 		// ① 就绪回调（正路）。
 		try {
 			await this.ctx?.inject?.(["remote.dshEars"], () => {
-				if (this.disposed || this.snapshot.engine === "ears") return;
-				log(`dsh-ears 服务已就位（等待 ${Date.now() - started} ms），重新探测`);
-				this.detectEars().catch((error) => warn("dsh-ears 重探异常", error?.message ?? error));
+				if (this.disposed || this.earsAvailable === true) return;
+				log(`local Whisper 服务已就位（等待 ${Date.now() - started} ms），重新探测`);
+				this.detectEars({ silent: true }).catch((error) => warn("Whisper 重探异常", error?.message ?? error));
 			});
 		} catch (error) {
 			// `inject` 在精简 profile 上可能不支持或抛错，不当致命。
-			warn("等待 dsh-ears 服务就位失败（改用重试兜底）", error?.message ?? error);
+			warn("等待 Whisper 服务就位失败（改用重试兜底）", error?.message ?? error);
 		}
 
 		// ② 重试兜底：等在途的 `apply` 收敛。
 		//
-		//    2 次、间隔 1.5s —— 够覆盖"dsh-ears 的 apply 还没 await 完"，
-		//    又不会让用户为此干等。`silent` 是因为首次探测已经如实提示过。
+		//    2 次、间隔 1.5s —— 够覆盖"应用还没 await 完"。V2.1 起终止条件
+		//    改成 `earsAvailable === true`（可用性探到即可，不必等到切引擎），
+		//    否则 preferred=sensevoice 时引擎永远不会变成 ears，循环白跑满。
 		for (let attempt = 0; attempt < 2; attempt += 1) {
-			if (this.disposed || this.snapshot.engine === "ears") return;
+			if (this.disposed || this.earsAvailable === true) return;
 			await new Promise((resolve) => setTimeout(resolve, 1500));
-			if (this.disposed || this.snapshot.engine === "ears") return;
+			if (this.disposed || this.earsAvailable === true) return;
 			await this.detectEars({ silent: true });
 			if (this.earsAvailable === true) return;
 		}

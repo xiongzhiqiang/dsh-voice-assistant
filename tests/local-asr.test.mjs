@@ -10,6 +10,7 @@ import { SENSEVOICE_ASSETS, WHISPER_MODELS } from "../lib/asr/manifest.js";
 import { engineOptions } from "../src/client/core/asr-preference.js";
 import { probeSpeech } from "../src/client/core/engines/speech.js";
 import { asrStatus, asrTranscribe } from "../src/client/core/runtime.js";
+import { VoiceController } from "../src/client/core/controller.js";
 
 const failures = [];
 const check = (name, actual, expected) => {
@@ -100,6 +101,84 @@ await withFetch(
 	async () => {
 		const status = await asrStatus().catch((error) => ({ error: String(error.message) }));
 		check("API 不可用时如实抛错（由调用方降级）", status.error, "no-server");
+	},
+);
+
+console.log("── 首帧装配不能被强制引擎打断 ──");
+// 回归：V2.1 曾把 asrPreference 的读取放在 createEngine() 之后。配置强制
+// sensevoice 时，构造引擎当场读 `this.asrPreference.language` →
+// TypeError → 语音球/桌宠整个不挂载（用户看到的就是"卡通消失了"）。
+{
+	let constructed = false;
+	let error = null;
+	try {
+		const cfg = {
+			language: "zh-CN",
+			wake: {},
+			sleep: { idleTimeoutMs: 60000 },
+			asr: { engine: "sensevoice", maxSegmentMs: 15000 },
+			tts: {},
+			polish: {},
+			session: {},
+			agent: {},
+			routing: {},
+			answers: {},
+			interactions: {},
+			memory: {},
+			turn: {},
+			ui: {},
+			capabilities: {},
+		};
+		const controller = new VoiceController({ ctx: {}, config: cfg });
+		constructed = true;
+		check("强制 SenseVoice 时偏好已就位", controller.asrPreference?.language, "auto");
+	} catch (caught) {
+		error = caught?.message ?? String(caught);
+	}
+	check("强制 SenseVoice 时控制器可正常构造", constructed, true);
+	check("构造过程无异常", error, null);
+}
+
+console.log("── 可用性探测不受当前引擎门控（UI 两个选项都要如实标注）──");
+// 回归：V2.1 的 detectEars() 有 `preferred !== auto/ears → return`，
+// 配置固定 sensevoice 时 Whisper 根本没探测，UI 标「未检测到」，
+// 但模型就在项目里、API 也报 available:true。
+await withFetch(
+	async () => ({
+		ok: true,
+		json: async () => ({
+			ok: true,
+			enabled: true,
+			dataRoot: "C:/fake",
+			sensevoice: { available: true, model: "SenseVoice Small int8", precision: "int8" },
+			whisper: { available: true, model: "small", language: "zh" },
+		}),
+	}),
+	async () => {
+		const cfg = {
+			language: "zh-CN",
+			wake: {},
+			sleep: { idleTimeoutMs: 60000 },
+			asr: { engine: "sensevoice", httpReady: false, maxSegmentMs: 15000 },
+			tts: {},
+			polish: {},
+			session: {},
+			agent: {},
+			routing: {},
+			answers: {},
+			interactions: {},
+			memory: {},
+			turn: {},
+			ui: {},
+			capabilities: {},
+		};
+		const controller = new VoiceController({ ctx: {}, config: cfg });
+		await controller.detectEars({ silent: true });
+		await controller.detectSpeech({ silent: true });
+		check("强制 SenseVoice 时 Whisper 仍被探测", controller.earsAvailable, true);
+		check("Whisper 探测走内置 API", controller.earsVia, "local");
+		check("强制 SenseVoice 时 SenseVoice 可用", controller.speechAvailable, true);
+		check("探测不抢引擎（仍是被选的 SenseVoice）", controller.getSnapshot().engine, "sensevoice");
 	},
 );
 
