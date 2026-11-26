@@ -29,8 +29,12 @@ let createdSid = "";
 let defaultSid = "";
 try {
 	const health0 = await get("/health");
-	check("health 版本 1.8.0", health0.version, "1.8.0");
+	// 版本号不写死：这条冒烟的关注点是"会话管理能跑通"，版本由
+	// tests/visuals.test.mjs 的 `pkg.version === PLUGIN_VERSION` 守着。
+	check("health 有版本号", typeof health0.version === "string" && health0.version !== "", true);
 	check("root 会话是干净 v2", health0.agent?.sessionId, "session-voice-assistant-root-v2");
+	// V2.3（需求④）：任务台账自省必须在 health 里可见（排障靠它）。
+	check("health 暴露任务台账", typeof health0.tasks === "object" && health0.tasks !== null, true);
 
 	const list0 = await get("/sessions");
 	check("GET /sessions 成功", list0.ok, true);
@@ -40,11 +44,12 @@ try {
 	check("默认会话 id 兼容旧值", defaultSid, "session-voice-worker-bioinfo-v2");
 	const slots0 = (health0.delegation?.slots ?? []).length;
 
-	// 开新会话
-	const created = await post(`/sessions/${WORKER}`, { label: "冒烟测试会话" });
+	// 开新会话（需求③：不传 label 时占位名是「待命」，等首个任务来命名）
+	const created = await post(`/sessions/${WORKER}`, {});
 	check("开新会话成功", created.ok, true);
 	createdSid = created.session?.sessionId ?? "";
 	check("新会话 id 独立", createdSid !== "" && createdSid !== defaultSid, true);
+	check("新会话占位名是待命（需求③）", created.session?.label, "待命");
 	check("新会话成为活跃", (await get(`/sessions/${WORKER}`)).sessions?.[WORKER]?.activeSessionId, createdSid);
 	const health1 = await get("/health");
 	check("delegation slot +1", (health1.delegation?.slots ?? []).length, slots0 + 1);

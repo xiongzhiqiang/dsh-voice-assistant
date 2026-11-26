@@ -548,6 +548,15 @@ function renderPanel(controller, snapshot, onClose) {
 				? `${snapshot.pendingDelegations} 项处理中（完成后我会汇报要点）`
 				: "无在途任务",
 		),
+		// V2.3（需求④）：最近一次派单落在哪条任务上。这一行是"为什么又多了个
+		// 会话"的唯一可见证据 —— 归属判定把指令并进老任务时会话数不变，
+		// 判成新任务时才多一条；不显示的话用户只能看到侧边栏凭空多一项。
+		row(
+			"任务归属",
+			snapshot.lastTaskTitle === ""
+				? "暂无（还没有派过任务）"
+				: `${snapshot.lastTaskCreated === true ? "新任务" : "接着已有任务"}：${snapshot.lastTaskTitle}`,
+		),
 		// 需求④：三类互动（审批 / 提问 / 汇报）走**同一条按时间的流**，
 		// 这条留的是最近一条的原话。标签随类型变 —— 都写"最近汇报"会让
 		// 用户以为念的是任务结果，实际可能是"某工具需要你去界面允许"。

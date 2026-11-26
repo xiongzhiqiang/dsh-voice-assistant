@@ -167,9 +167,25 @@ function css(accent) {
 @keyframes xfv-fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 
 /* ── 设置面板 ────────────────────────────────────────────────────── */
+/*
+ * 需求①：面板内容会随版本增长（识别方式、会话列表、互动流…），而
+ * `.xfv-root` 是"贴底 flex 列、面板排在音球上方"。面板一高，它的**顶部**
+ * 就顶出视口，标题栏与关闭按钮被切掉 —— 用户点不到 × 。
+ *
+ * 三道闸一起上，缺一不可：
+ *   1. `max-height` 用 dvh 且留出音球 + 边距的余量 —— 视觉上永不超屏；
+ *   2. `overflow-y: auto` —— 超高时**面板内部**滚动，而不是往外溢；
+ *   3. 标题栏 `sticky` 吸顶 —— 滚动时关闭按钮恒定可见（治本的那道）。
+ *
+ * 用 `dvh` 而不是 `vh`：移动端/带地址栏时 `vh` 会算得比可视区高，
+ * 那样"贴着底边"的面板仍会被顶掉一截。
+ */
 .xfv-panel {
 	pointer-events: auto;
 	width: 288px;
+	max-height: calc(100dvh - 120px);
+	overflow-y: auto;
+	overscroll-behavior: contain;
 	border-radius: 14px;
 	background: var(--xfv-surface);
 	border: 1px solid var(--xfv-border);
@@ -179,10 +195,19 @@ function css(accent) {
 	line-height: 1.55;
 }
 .xfv-panel-head {
+	position: sticky;
+	top: -14px;
+	z-index: 3;
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
-	margin-bottom: 10px;
+	/* 负外边距把吸顶条拉满卡片宽度（抵消 .xfv-panel 的 padding），
+	   再用等量 padding 把内容推回来 —— 否则滚动时下面的行会从两侧"漏"出来。 */
+	margin: -14px -14px 10px;
+	padding: 12px 14px 8px;
+	background: var(--xfv-surface);
+	border-bottom: 1px solid var(--xfv-border);
+	border-radius: 14px 14px 0 0;
 }
 .xfv-title { font-weight: 600; font-size: 14px; }
 .xfv-close {
@@ -326,7 +351,7 @@ function css(accent) {
 .xfv-expert {
 	pointer-events: auto;
 	/* position/left/top 由内联样式给出（fixed + 视口绝对坐标），见 drag.js。 */
-	width: 64px;
+	width: 128px;
 	cursor: grab;
 	touch-action: none; /* 触屏拖拽时不要滚页面 */
 	user-select: none;
@@ -341,11 +366,12 @@ function css(accent) {
 	100% { opacity: 1; transform: translateX(0) scale(1); }
 }
 
-/* 透明底：figure 本身无背景/边框，靠 drop-shadow 让形象与背景分离。 */
+/* 透明底：figure 本身无背景/边框，靠 drop-shadow 让形象与背景分离。
+   尺寸与 expert-visual.js 的 EXPERT_SIZE 必须同步（拖拽边界收敛读那个值）。 */
 .xfv-expert-figure {
 	position: relative;
-	width: 64px;
-	height: 64px;
+	width: 128px;
+	height: 128px;
 	overflow: visible;
 	filter: drop-shadow(0 3px 6px rgba(16, 24, 40, 0.34));
 	transition: filter 180ms ease;
@@ -373,27 +399,27 @@ function css(accent) {
 	place-items: center;
 	width: 100%;
 	height: 100%;
-	font-size: 26px;
+	font-size: 52px;
 	font-weight: 700;
 	color: var(--xfv-accent, #2f6bff);
 }
 .xfv-expert-status {
 	position: absolute;
-	right: 2px;
-	bottom: 2px;
-	width: 12px;
-	height: 12px;
+	right: 4px;
+	bottom: 4px;
+	width: 20px;
+	height: 20px;
 	border-radius: 50%;
-	border: 2px solid rgba(255, 255, 255, 0.9);
+	border: 3px solid rgba(255, 255, 255, 0.9);
 	background: #12b76a;
 	box-shadow: 0 1px 3px rgba(16, 24, 40, 0.3);
 }
 .xfv-expert[data-busy="true"] .xfv-expert-status { background: #f79009; }
 .xfv-expert-name {
 	text-align: center;
-	font-size: 11px;
+	font-size: 14px;
 	line-height: 1.3;
-	margin-top: 2px;
+	margin-top: 3px;
 	color: var(--xfv-sub, #5b6472);
 	text-shadow: 0 1px 3px rgba(255, 255, 255, 0.95), 0 1px 2px rgba(255, 255, 255, 0.9);
 }
@@ -402,17 +428,17 @@ function css(accent) {
 .xfv-expert-min {
 	position: absolute;
 	z-index: 2;
-	top: -5px;
-	right: -5px;
-	width: 20px;
-	height: 20px;
+	top: -6px;
+	right: -6px;
+	width: 28px;
+	height: 28px;
 	padding: 0;
 	border-radius: 50%;
 	border: 1px solid var(--xfv-border, rgba(16, 24, 40, 0.12));
 	background: var(--xfv-surface, rgba(255, 255, 255, 0.94));
 	box-shadow: 0 2px 6px rgba(16, 24, 40, 0.18);
 	color: var(--xfv-sub, #5b6472);
-	font-size: 12px;
+	font-size: 15px;
 	line-height: 1;
 	cursor: pointer;
 }
@@ -420,9 +446,9 @@ function css(accent) {
 
 .xfv-expert-task {
 	position: absolute;
-	left: calc(100% + 8px);
+	left: calc(100% + 10px);
 	top: 0;
-	width: 190px;
+	width: 210px;
 	padding: 8px 10px;
 	border-radius: 10px;
 	background: var(--xfv-surface, rgba(255, 255, 255, 0.96));

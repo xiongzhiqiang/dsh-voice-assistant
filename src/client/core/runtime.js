@@ -172,18 +172,38 @@ export async function asrTranscribe(engine, audioBase64, language = "auto") {
 
 /**
  * V1.3：把任务委托给 worker 后台执行（当场返回，不切会话）。
+ *
+ * V2.3（需求④）：不带 `sessionId` 时宿主会先判**任务归属** —— 老任务回它原
+ * 来的会话、新任务用任务名开新会话。要强制"别自动归属"（例如用户显式点名了
+ * 会话）就传 `sessionId`；要关掉判定但沿用活跃会话则传 `options.attribute=false`。
+ *
  * @param worker - worker id。
  * @param task - 路由改写后的任务文本。
- * @returns `{ ok, jobId?, workerId, label?, error? }`。
+ * @param sessionId - 显式目标会话（非空时宿主跳过归属判定）。
+ * @param options - `{ attribute }`。
+ * @returns `{ ok, jobId?, workerId, label?, sessionId?, attribution?, error? }`，
+ *   `attribution` 为 `{taskId,title,via,created}`（判定结果）。
  */
-export async function delegate(worker, task, sessionId = "") {
+export async function delegate(worker, task, sessionId = "", options = {}) {
 	const payload = { worker, task };
 	if (sessionId !== "") payload.sessionId = sessionId;
+	if (options?.attribute === false) payload.attribute = false;
 	const response = await request("/delegate", {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify(payload),
 	});
+	return response.json();
+}
+
+/**
+ * V2.3（需求④）：读某位专家（或全部）的任务台账。
+ * @param workerId - 专家 id；空串取全部。
+ * @returns `{ ok, tasks, state? }`。
+ */
+export async function tasks(workerId = "") {
+	const suffix = workerId === "" ? "" : `/${encodeURIComponent(workerId)}`;
+	const response = await request(`/tasks${suffix}`, { method: "GET" });
 	return response.json();
 }
 

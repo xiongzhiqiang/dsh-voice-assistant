@@ -123,6 +123,15 @@ export class VoiceController {
 			routedWorker: "",
 			routeVia: "",
 			/**
+			 * V2.3（需求④）：最近一次派单的**任务归属**结果。
+			 * `lastTaskTitle` 是那条任务的名称（老任务用它的原名、新任务用新起的
+			 * 任务名）；`lastTaskCreated` 为真表示这次开了新任务/新会话。
+			 * 面板据此显示"接着老任务"还是"新开任务" —— 这是用户判断
+			 * "为什么又多了个会话"的唯一可见线索。
+			 */
+			lastTaskTitle: "",
+			lastTaskCreated: false,
+			/**
 			 * V1.3 委托汇报 / 需求④互动：当前已派给 worker、还在后台执行的任务数（界面显示"处理中"）。
 			 */
 			pendingDelegations: 0,
@@ -1297,18 +1306,33 @@ export class VoiceController {
 
 				if (worker !== undefined && worker.id !== "general") {
 					// 真正的专家：提交给宿主后台执行，不切会话、不旁听中间过程。
+					// V2.3（需求④）：宿主侧会先判任务归属 —— 老任务回它原来的会话、
+					// 新任务用任务名开新会话。返回的 attribution 供界面显示"落在哪条任务"。
 					try {
 						const result = await delegate(worker.id, task);
 						if (generation !== this.generation) return;
 						if (result?.ok === true) {
 							delegated = true;
+							const attribution = result.attribution ?? null;
 							this.patch({
 								routedWorker: worker.label,
 								routeVia,
 								pendingDelegations: this.snapshot.pendingDelegations + 1,
 								sessionTarget: this.session.describe(),
+								// 最近一次归属（面板显示"归入已有任务/新任务"）。
+								lastTaskTitle: typeof attribution?.title === "string" ? attribution.title : "",
+								lastTaskCreated: attribution?.created === true,
 							});
-							this.notice(`已交给${worker.label}处理，完成后我会汇报要点。`, "info");
+							// 播报口径要说清"是接着老任务做，还是开了新任务" ——
+							// 用户听到"已交给阿码处理"时脑子里真正想知道的就是这个。
+							this.notice(
+								attribution === null
+									? `已交给${worker.label}处理，完成后我会汇报要点。`
+									: attribution.created === true
+										? `已为${worker.label}开新任务「${attribution.title}」，完成后我会汇报要点。`
+										: `已接着${worker.label}的任务「${attribution.title}」继续，完成后我会汇报要点。`,
+								"info",
+							);
 							// 立刻探一次（worker 可能几百毫秒就完成），并启动轮询。
 							this.startReportPolling();
 							this.pollReports();

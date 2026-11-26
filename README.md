@@ -7,10 +7,80 @@
 一个 DSH bundle 插件：宿主半（配置 / 润色 / 路由 / worker 专家 / **专家技能** /
 **委托中枢** / **互动中枢** / 语音代理）+ 客户端半（浮层 / 状态机 / 唤醒 / 播报）。
 
-版本：`2.2.0`（V2.2 = 专家系统以 `~/.dsh/voice-assistant/experts/*.json` 为唯一真相源，增删改实时同步运行时；V2.1 = 识别后端完全内置，不再依赖 `voice-input-bundle` / `dsh-ears` 安装）。
+版本：`2.3.0`（V2.3 = 专家**任务台账 + 任务归属判定**、会话按任务名命名、桌宠尺寸翻倍、设置面板防溢出；V2.2 = 专家系统以 `~/.dsh/voice-assistant/experts/*.json` 为唯一真相源，增删改实时同步运行时；V2.1 = 识别后端完全内置，不再依赖 `voice-input-bundle` / `dsh-ears` 安装）。
 
 > **新用户请先看 [INSTALL.md](./INSTALL.md)** —— 独立的安装与使用说明（前置要求、
 > 安装、配置、语音/专家/会话命令、验证、卸载、识别后端）。本 README 偏设计原理与历史踩坑。
+
+## V2.3：专家记得自己接过哪些任务（任务台账 + 归属判定）
+
+V2.2 之前，专家收到的每条讯息都默认投进**当前活跃会话**。于是「接着昨天那个火山图」
+和「帮我写个新脚本」落在同一个会话里，上下文互相污染，昨天那条任务也被埋掉。
+V2.3 给每位专家加一份**任务台账**，并在派单前先判一次「这条消息说的是哪件旧事」。
+
+**一、任务台账（`<expertDir>/_state/tasks.json`）**
+
+| 字段 | 说明 |
+|---|---|
+| `taskId` | `task-<worker>-<base36>-<rand4>`，稳定不随会话改名而变化 |
+| `title` | 从首条任务文本截出的短名（≤24 字），**记首名**：同一任务后续消息不会覆盖第一次的名字 |
+| `sessionId` | 这件任务当前落在哪个会话 |
+| `status` | `active` / `done`（会话被关时按有无活跃会话改判） |
+| `count` | 这件任务累积收过几条消息 |
+
+每位专家上限 `TASKS_PER_WORKER_LIMIT = 24` 件，超限丢最旧。写盘用「临时文件 + rename」
+原子替换；文件损坏时返回空表 + `problems`，**不阻断派单**（降级纪律见下）。
+
+**二、归属判定三段式**
+
+```
+新消息 → ① 规则强命中：字符二元组 Jaccard ≥ TASK_MATCH_STRONG(0.62) → 直接判为老任务
+         ↓ 没命中
+         ② LLM 判一次：「这条消息是接着下面哪件已做的任务？还是新任务？」
+                     （只认 taskId 白名单，越界一律当新任务）
+         ↓ 没选出 / 模型不可用
+         ③ 规则弱兜底：Jaccard ≥ TASK_MATCH_WEAK(0.34) → 回流原任务
+         ↓ 都不满足
+         ④ 新任务：新开一个会话，用任务名给它命名
+```
+
+台账为空时**跳过前两步**直接开新任务（省一次模型调用）。
+
+**取舍依据**：宁可多问一次模型、也不要误开新会话 —— 误开新会话会把上下文接到别的
+任务上，用户几乎立刻能感觉到；而多花一次小模型调用只是慢一点。
+
+**三、会话命名：从「默认会话」改成任务名**
+
+- 空会话的占位名统一为「待命」（`IDLE_SESSION_LABEL`），首个任务落进来时按任务名命名；
+  旧版遗留的「默认会话」「会话 N」会在读盘归一化时被识别为占位名、同样可被覆盖。
+- 命名是**只在占位名上生效**的（`onlyIfIdle`）：已有任务名的会话不会被新任务抢走名字。
+- `titleFromTask()` 剥礼貌前缀（最多 4 轮「帮我 / 麻烦 / 请 / 你能不能…」）→ 取首分句
+  （不足 4 字退回整句）→ 去尾部语气词 → 超过 24 字截断加「…」。
+- 手动改名走 `POST /sessions/<id>/rename`（`onlyIfIdle: false`），语音命令亦可。
+
+**四、会话失效时怎么办（两个刻意的选择）**
+
+| 情形 | 行为 | 为什么 |
+|---|---|---|
+| 任务指向的会话已被关掉 | **复用同一个 `taskId` 新开一个会话续上** | 回退到活跃会话会把这件任务的上下文接到另一个任务上 |
+| 该专家会话数已达上限 | 退到活跃会话，回包标 `via: "fallback"` | 不因「开不了会话」而拒绝派单 |
+| 关会话时（`onSessionClosed`） | 指向它的任务改指到活跃会话；没有活跃会话则标 `done` | 避免台账永久指向一个死会话 |
+
+**五、调参与逃生口**
+
+- 阈值 `TASK_MATCH_STRONG` / `TASK_MATCH_WEAK` 在 `lib/expert-tasks.js`；归属 prompt 与
+  `parseAttribution` 在 `lib/task-route.js`。
+- `POST /delegate` 带 `attribute: false` 可**完全跳过**归属判定，强制投指定会话 ——
+  两个冒烟脚本用它，避免每次冒烟都污染真实台账。
+- 只读面：`GET /tasks`（全部/按专家）与 `GET /tasks/<taskId>`；`GET /health` 的 `tasks`
+  段给 count/limit/recent（最近 5 条）。
+- 语音/面板：委托人回报会念「已为 X 开新任务『…』」或「已接着 X 的任务『…』继续」，
+  面板里也有一行「任务归属」。
+
+**六、降级纪律（一句话）**
+
+台账、跨专家摘要、归属判定**全部是增强**：任何一步失败都退化成「投活跃会话」，
+**绝不因为「判不出来」而拒绝派单**。
 
 ## V2.2：专家系统单一数据源（目录 JSON 说了算）
 
@@ -807,6 +877,8 @@ dsh plugin --profile web add "$PWD"
 node tests/host.test.mjs            # 宿主纯逻辑：配置归一化、密钥不外泄、规则清理、润色跑偏检测
 node tests/client-core.test.mjs     # 状态机、唤醒词匹配、播报文本清洗、事件形状契约
 node tests/experts.test.mjs         # 专家技能扫描/注册、多来源合并、统一互动流（需求①④）
+node tests/task-memory.test.mjs     # V2.3 任务台账与归属判定（含会话命名、占位名迁移、台账落盘/坏文件、
+                                    #      归属中枢端到端：复述复用 / 无关新开 / 关会话重指 / 达上限退活跃会话）
 node tools/smoke-bundle.mjs         # 客户端 bundle 语法/模块表/apply/卸载清理
 node tools/smoke-host.mjs           # 宿主半在 fake ctx 上跑通 API 端点
 node tools/smoke-delegation-http.mjs # V1.4 真机派单 → 回报 → 互动流按时间播报
@@ -823,7 +895,7 @@ node tools/cdp-probe.mjs "http://127.0.0.1:3080/?token=…" 12   # 真浏览器�
 
 | 层 | 覆盖的问题 | 静态测试为什么看不见 |
 |---|---|---|
-| `tests/*.test.mjs` | 配置归一化、状态机、文本清洗、跑偏检测、轮次门槛、回声判据、**识别错误分类与引擎回退**、**技能扫描/注册与互动队列单调性** | —— |
+| `tests/*.test.mjs` | 配置归一化、状态机、文本清洗、跑偏检测、轮次门槛、回声判据、**识别错误分类与引擎回退**、**技能扫描/注册与互动队列单调性**、**任务台账与归属判定三段式** | —— |
 | `smoke-bundle.mjs` | 客户端 bundle 能不能装进浏览器 | 语法错要到 boot 才炸 |
 | `smoke-host.mjs` | 四条 API 端点在 fake ctx 上通不通 | 依赖注入错要到真 ctx 才炸 |
 | `smoke-agent-route.mjs` | **常驻 agent 有没有模型** | `registry.create()` 缺 `agentOptions` 时，一切"看起来正常" |
@@ -1835,13 +1907,16 @@ lib/identity.js             宿主半身份：常驻会话可见性标注 + 全�
 lib/agent.js                常驻 agent：模型路由解析/落盘、**人格段（V1.5 含职责边界）**、**preset 挂载（mountAgentPreset）**、生命周期
 lib/workers.js              worker 专家层：general 系统锚点、目录 JSON 唯一真相源扫描（含坏文件/墓碑容错）、归一化、批量建立（逐项进度 + 建立/归档自愈双超时）、技能桥
 lib/expert-registry.js      V1.7 专家注册表：id 校验、原子写入（临时文件+rename）、自定义专家增删、删除墓碑
-lib/expert-manager.js       V1.7 专家管理中枢：改文件→重扫→原地更新清单→建/销 agent→注册委托；expertDir 解析
+lib/expert-manager.js       V1.7 专家管理中枢：改文件→重扫→原地更新清单→建/销 agent→注册委托；expertDir 解析；V2.3 删专家时一并清任务台账
+lib/expert-tasks.js         V2.3 任务台账（<expertDir>/_state/tasks.json）：纯函数层（taskId / titleFromTask / 二元组 Jaccard / matchTask / upsertTask / renderTaskList）+ 原子读写 store，上限 24 条
+lib/task-route.js           V2.3 归属判定：parseAttribution（剥代码块 + taskId 白名单）+ attributeTask 三段决策（rule 0.62 / llm / rule-weak 0.34）
+lib/task-manager.js         V2.3 任务归属中枢：resolveTarget 三出口（回原会话 / 开新会话并命名 / 退活跃会话）；record·repoint·markDone·onSessionClosed·removeWorker
 src/client/core/expert-commands.js V1.7 语音命令规则解析（增删改查 + id 派生 + 播报文案，纯函数）
 src/client/core/controller.js V1.7 润色前拦截管理命令、执行 API、口头回报、热更新本地专家清单
 lib/skills.js               V1.4 专家技能：扫盘（内置/用户两层）、frontmatter 解析、**注册进 agent 作用域**、可用性自省
 lib/router.js               意图路由（两层第一层）：LLM 意图分类 + 任务改写；严格 JSON + 白名单 + general 兜底；V1.5 加「临床/生医/科研有实质内容必须派专家」规则
 lib/messages.js             identified message 工厂：优先官方 createUserMessage，兜底随机 id（坑十四）
-lib/delegation.js           V1.3 委托中枢：派单、结果捕获、LLM 汇总、同 worker 串行/不同 worker 并行、任务超时；V1.7 加 removeWorker
+lib/delegation.js           V1.3 委托中枢：派单、结果捕获、LLM 汇总、同 worker 串行/不同 worker 并行、任务超时；V1.7 加 removeWorker；V2.3 派单前注入任务台账上下文（getTaskContext，失败只 warn）
 lib/interactions.js         V1.4 互动中枢：旁听 session/event（审批/提问）、与汇报合流成一条按 at 排序的队列
 lib/interaction-kinds.js    互动类型常量（宿主与客户端共用；改一处不会漏另一处）
 lib/report.js               V1.3 汇报队列：严格单调游标、规则降级摘要、可朗读文案；V1.5 加 **`condenseArtifacts`（路径→「N 个文件，都在工作目录下」）**
@@ -1852,7 +1927,8 @@ lib/version.js              版本号唯一来源（health 引用；单测钉住
 assets/characters/          V1.6 六张 AI 生成 + 抠图的透明底 PNG（5 位专家 + 音球）
 lib/polish.js               转录润色（llm.stream）+ 跑偏检测 + 规则兜底
 lib/upstream.js             OpenAI 兼容 ASR/TTS 代理
-lib/routes.js               /health /config /polish /route /delegate /reports /interactions /asr /tts；V1.7 /experts 增删列
+lib/expert-sessions.js       V1.8 会话注册表 + 跨会话记忆摘要（`<expertDir>/_state/sessions.json`）；V2.3 加「待命」占位名 + renameSession/nameByTask
+lib/routes.js               /health /config /polish /route /delegate /reports /interactions /asr /tts；V1.7 /experts 增删列；V2.3 加 /tasks、/tasks/<id>、/sessions/<id>/rename
 skills/                     插件内置技能（随包发布，见 package.json 的 files）
 skills/somatic-mutation-report/SKILL.md  体细胞突变报告流程（小因·基因分析的技能）
 src/client/index.js         客户端入口：装配、快捷键、卸载
@@ -1867,7 +1943,7 @@ src/client/core/ledger.js   V1.5 播报账本：持久化游标 + 已播 key 集
 src/client/core/text.js     播报前清洗、分句、事件取文本（兼容 data 包裹）
 src/client/core/audio/wav.js 浏览器录音 → 16k 单声道 PCM16 WAV（本地 Whisper 等后端的硬要求；含宿主侧判定的忠实复刻）
 src/client/core/engines/    webspeech.js | http.js | ears.js（ears 内含命名空间多路取法 + 按后端决定是否转码）
-src/client/ui/Orb.js        语音球（V1.6 拟人形象 + 拖拽）+ 状态面板 + 待提交倒计时 + 会话切换区
+src/client/ui/Orb.js        语音球（V1.6 拟人形象 + 拖拽）+ 状态面板 + 待提交倒计时 + 会话切换区；V2.3 面板加「任务归属」行
 src/client/ui/Experts.js    V1.6 专家桌宠层：轮询 /activities、忙闲姿态、任务气泡、可拖拽
 src/client/ui/drag.js       V1.6 拖拽纯函数：边界收敛 / 指针换算 / 手势阈值 / 位置持久化
 src/client/ui/useDrag.js    V1.6 拖拽 hook：pointer capture + 点击/拖拽区分

@@ -117,6 +117,14 @@ try {
 	check("提问播报开着", inter.announceQuestions === true, JSON.stringify(inter.announceQuestions));
 	check("旁听的会话是 5 条（根 agent + 4 位独立 worker）", inter.watching === 5, String(inter.watching));
 
+	// ── 1d. 需求④：任务台账端点可用（这是"任务列表记忆"的对外契约）────
+	const tasksAll = await api("/tasks");
+	check("GET /tasks 成功", tasksAll?.ok === true, JSON.stringify(tasksAll)?.slice(0, 120));
+	check("台账按专家归集", typeof tasksAll?.tasks === "object" && tasksAll.tasks !== null, typeof tasksAll?.tasks);
+	check("health 里也有台账自省", typeof health?.tasks === "object" && health.tasks !== null, typeof health?.tasks);
+	const tasksOne = await api("/tasks/coder");
+	check("GET /tasks/<id> 成功", tasksOne?.ok === true && Array.isArray(tasksOne.tasks), JSON.stringify(tasksOne)?.slice(0, 120));
+
 	// ── 2. 路由 ─────────────────────────────────────────────────────────
 	const routeText = "帮我写一段 Python 代码，打印 hello，然后把代码保存到文件里。";
 	const routed = await api("/route", { method: "POST", body: { text: routeText } });
@@ -148,8 +156,10 @@ try {
 	const researcherTask = "请用一句话说明语音助手里 router 与 worker 的分工，不要修改任何文件。";
 
 	const started = Date.now();
-	const r1 = await api("/delegate", { method: "POST", body: { worker: "researcher", task: researcherTask } });
-	const r2 = await api("/delegate", { method: "POST", body: { worker: "coder", task: coderTask } });
+	// V2.3（需求④）：`attribute:false` = 跳过任务归属判定。冒烟脚本要的是
+	// "派单链路通不通"，不希望每次跑都在专家目录里留下一条新任务会话。
+	const r1 = await api("/delegate", { method: "POST", body: { worker: "researcher", task: researcherTask, attribute: false } });
+	const r2 = await api("/delegate", { method: "POST", body: { worker: "coder", task: coderTask, attribute: false } });
 	check("researcher 派单当场成功", r1?.ok === true, JSON.stringify(r1));
 	check("coder 派单当场成功", r2?.ok === true, JSON.stringify(r2));
 	check("两次派单都有 jobId", typeof r1?.jobId === "string" && typeof r2?.jobId === "string", `${r1?.jobId} / ${r2?.jobId}`);

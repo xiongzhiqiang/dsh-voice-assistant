@@ -46,7 +46,7 @@ check("未知 id 的 URL 也安全", avatarUrl("/api", "../secret"), "/api/avata
 // 打包清单必须含 assets/ —— 漏了它 junction 安装看不出问题、
 // 打包安装后所有图像全消失（V1.4 的 skills/ 就是这个坑）。
 check("files 清单含 assets/", pkg.files.includes("assets/"), true);
-check("版本号与 lib/version.js 一致", pkg.version, "2.2.0");
+check("版本号与 lib/version.js 一致", pkg.version, "2.3.0");
 
 // 六张素材必须都真实存在且带 alpha（抠过图），否则运行期会出白底方块。
 const ASSET_DIR = join(process.cwd(), "assets", "characters");
@@ -148,10 +148,12 @@ check("可见序号从 0 连续分配",
 );
 check("默认位置按序号向下错开",
 	[defaultExpertPosition(0), defaultExpertPosition(1), defaultExpertPosition(2)],
-	[{ x: 18, y: 96 }, { x: 18, y: 186 }, { x: 18, y: 276 }],
+	[{ x: 18, y: 96 }, { x: 18, y: 260 }, { x: 18, y: 424 }],
 );
-check("默认布局常量与位置一致", DEFAULT_LAYOUT.gap, 90);
-check("桌宠尺寸常量稳定", EXPERT_SIZE, { w: 64, h: 82 });
+check("默认布局常量与位置一致", DEFAULT_LAYOUT.gap, 164);
+// 需求②：形象增大一倍（64×82 → 128×152），间距必须 ≥ 高度，否则桌宠会叠住。
+check("桌宠尺寸常量稳定（需求②：翻倍）", EXPERT_SIZE, { w: 128, h: 152 });
+check("默认间距不小于桌宠高度", DEFAULT_LAYOUT.gap >= EXPERT_SIZE.h, true);
 check("最小化切换：加入", toggleMinimized([], "bioinfo"), ["bioinfo"]);
 check("最小化切换：再点移除", toggleMinimized(["bioinfo"], "bioinfo"), []);
 check("最小化切换：逐 id 独立", toggleMinimized(["bioinfo"], "pathologist"), ["bioinfo", "pathologist"]);

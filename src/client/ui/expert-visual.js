@@ -14,11 +14,27 @@
  * 纯函数，用数值单测钉死，组件只负责把结果渲染出来。
  */
 
-/** 桌宠尺寸（与 styles.js 的 .xfv-expert-figure 对齐，含名字行）。 */
-export const EXPERT_SIZE = Object.freeze({ w: 64, h: 82 });
+/**
+ * 桌宠尺寸（与 styles.js 的 .xfv-expert-figure / .xfv-expert 对齐，含名字行）。
+ *
+ * 需求②：用户要求形象"增大一倍"，故由 64×82 提到 128×152。
+ *   128 = 64 × 2（形象本体）；
+ *   152 = 128 + 名字行（font-size 14 × line-height 1.3 ≈ 18.2）+ margin-top 3 ≈ 149，
+ *         取 152 留 3px 容差，避免把名字行算到卡片外。
+ *
+ * ⚠️ 改这里必须同步 styles.js 的 `.xfv-expert` / `.xfv-expert-figure` 宽度与高度，
+ * 以及 `.xfv-expert-initial` 字号 —— 三处不一致会让拖拽边界收敛用错尺寸
+ * （元素比视口大时的 clampPosition 分支会算歪），单测 `visuals.test.mjs` 钉着这个值。
+ */
+export const EXPERT_SIZE = Object.freeze({ w: 128, h: 152 });
 
-/** 左侧竖排的默认起点与间距（未拖拽过的桌宠按此错开，避免叠在一起）。 */
-export const DEFAULT_LAYOUT = Object.freeze({ left: 18, top: 96, gap: 90 });
+/**
+ * 左侧竖排的默认起点与间距（未拖拽过的桌宠按此错开，避免叠在一起）。
+ *
+ * gap 必须 ≥ EXPERT_SIZE.h，否则两张桌宠会互相压住。原 90（对应 82 高）
+ * 留 8px 余量；尺寸翻倍后取 164（152 + 12），保持同样的观感间距。
+ */
+export const DEFAULT_LAYOUT = Object.freeze({ left: 18, top: 96, gap: 164 });
 
 /**
  * 某张桌宠此刻是否该显示。

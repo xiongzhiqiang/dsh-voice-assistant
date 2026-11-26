@@ -38,11 +38,15 @@
 
         # ── 语音识别（转录）──────────────────────────────────────────────
         asr:
-          # auto      = 装了 dsh-ears 就用它的 8 个后端；否则浏览器 Web Speech
-          # ears      = 强制复用 dsh-ears（本地 Whisper / Groq / 阿里云 / 腾讯云…）
-          # webspeech = 只用浏览器 Web Speech API（零配置）
-          # http      = 只用下面 http 里配的 OpenAI 兼容端点
-          engine: 'auto'
+          # auto       = 浏览器识别优先，失败时按死名单降级（ears / sensevoice / http）
+          # ears       = 强制走本地 Whisper（项目内置实现）
+          # sensevoice = 强制走本地 SenseVoice（项目内置实现，不联网）
+          # webspeech  = 只用浏览器 Web Speech API
+          # http       = 只用下面 http 里配的 OpenAI 兼容端点
+          #
+          # 2026-11-25 用户确认改为固定本地 SenseVoice：
+          # 断网也能识别，且不受浏览器 Web Speech 可用性影响。
+          engine: 'sensevoice'
           http:
             baseURL: ''
             apiKey: ''
@@ -192,3 +196,11 @@
         routing:
           expertDirs:
             - C:\Users\xqz19\.dsh\voice-assistant\experts
+          # ── 任务台账（V2.3）────────────────────────────────────────────
+          #
+          # 每位专家的任务台账落在 <expertDir>/_state/tasks.json，与
+          # sessions.json 同目录，**不需要在这里配**。
+          #
+          # 归属判定阈值（规则强命中 0.62 / 弱兜底 0.34、每位专家上限 24 件）
+          # 目前是代码常量，见 lib/expert-tasks.js。要临时绕过判定、
+          # 强制投指定会话：POST /delegate 的 body 带 "attribute": false。

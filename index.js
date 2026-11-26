@@ -41,7 +41,9 @@ import { createDelegationHub } from "./lib/delegation.js";
 import { createInteractionHub } from "./lib/interactions.js";
 import { createExpertManager, defaultExpertDir, expertDirFromConfig } from "./lib/expert-manager.js";
 import { createExpertSessionStore } from "./lib/expert-sessions.js";
+import { createExpertTaskStore } from "./lib/expert-tasks.js";
 import { createSessionManager } from "./lib/session-manager.js";
+import { createTaskManager } from "./lib/task-manager.js";
 import { labelAgentSession, registerGlobalMemory, ensureSessionNotArchived } from "./lib/identity.js";
 import { PLUGIN_VERSION } from "./lib/version.js";
 import { createLocalAsr } from "./lib/asr/runtime.js";
@@ -153,9 +155,19 @@ export function apply(ctx, config = {}) {
 	 * （派单发生在启动完成之后，届时变量已就绪）。
 	 */
 	let sessionManager = null;
+	/** V2.3（需求④）：任务归属中枢（在 sessionManager 之后构造，见下）。 */
+	let taskManager = null;
 	const sessionStore = createExpertSessionStore(expertDirFromConfig(normalized));
 	for (const problem of sessionStore.reload()) {
 		ctx.logger?.warn?.(`voice-assistant: 会话注册表问题（已按空表处理）—— ${problem}`);
+	}
+	/**
+	 * V2.3（需求④）：专家任务台账。与会话注册表同目录（`_state/tasks.json`），
+	 * 记"这个专家接过哪些任务、每条在哪个会话里"。
+	 */
+	const taskStore = createExpertTaskStore(expertDirFromConfig(normalized));
+	for (const problem of taskStore.reload()) {
+		ctx.logger?.warn?.(`voice-assistant: 任务台账问题（已按空表处理）—— ${problem}`);
 	}
 	const delegation = createDelegationHub(ctx, normalized, {
 		onReport: (entry) => interactions.pushReport(entry),
@@ -164,6 +176,9 @@ export function apply(ctx, config = {}) {
 		onDigest: (workerId, entry) => {
 			if (sessionManager) sessionManager.appendDigest(workerId, entry);
 		},
+		// V2.3（需求④）：任务台账也一并注入 —— 摘要记的是"做完的结论"，
+		// 台账记的是"在做哪些任务、各自在哪个会话"，两者互补。
+		getTaskContext: (workerId) => (taskManager ? taskManager.contextText(workerId) : ""),
 	});
 	ctx.effect(() => () => delegation.dispose(), "voice-assistant: 委托中枢生命周期");
 
@@ -268,6 +283,8 @@ export function apply(ctx, config = {}) {
 			delegation: delegation.state(),
 			/** V1.8 专家会话注册表（每专家的会话列表 + 活跃会话 + 摘要条数）。 */
 			sessions: sessionStore ? summarizeSessions(sessionStore.list()) : {},
+			/** V2.3（需求④）任务台账自省：每位专家的任务条数与最近几条标题。 */
+			tasks: taskManager ? taskManager.state() : {},
 			/** V2.1 内置识别：静态自省（模型是否校验通过走 /asr/status，避免 health 里哈希几百 MB）。 */
 			asrLocal: localAsr.state(),
 			capabilities: {
@@ -307,6 +324,8 @@ export function apply(ctx, config = {}) {
 		// V2.2：目录 JSON 是唯一真相源。删专家时清会话；手工增删 JSON 时
 		// watcher 自动重扫并同步运行时（agent/delegation/health）。
 		sessionStore,
+		// V2.3：删专家时同清任务台账（否则以后添回同名专家会认领旧任务）。
+		taskStore,
 		logger: ctx.logger,
 	});
 	// 目录监听生命周期跟随插件卸载。
@@ -329,6 +348,27 @@ export function apply(ctx, config = {}) {
 		onSlotRemoved: ({ id, sessionId }) => {
 			workersStatus = workersStatus.filter((item) => !(item.id === id && item.sessionId === sessionId));
 		},
+		// V2.3（需求④）：会话被关时把指着它的任务改指到活跃会话，
+		// 否则那些任务永远只能"续成新会话"（用户会觉得它又开了一个新会话）。
+		onSessionClosed: ({ id, sessionId, fallbackSessionId }) => {
+			if (taskManager === null) return;
+			const result = taskManager.onSessionClosed(id, sessionId, fallbackSessionId);
+			if (result.changed) {
+				ctx.logger?.info?.(`voice-assistant: 会话关闭后已重指 ${id} 的任务台账`);
+			}
+		},
+		logger: ctx.logger,
+	});
+
+	/**
+	 * V2.3（需求④）：任务归属中枢 —— 派单前判定"这句指令是老任务还是新任务"，
+	 * 老任务回原会话、新任务用任务名开新会话（需求③）。
+	 * 构造在 sessionManager 之后：它需要 sessionManager 来新建会话。
+	 */
+	taskManager = createTaskManager({
+		store: taskStore,
+		sessionManager,
+		workerOf: (id) => normalized.routing.workers.find((w) => w.id === id) ?? null,
 		logger: ctx.logger,
 	});
 
@@ -559,7 +599,7 @@ export function apply(ctx, config = {}) {
 		// 2) 本机 API。注册失败（前缀冲突）只告警：语音球仍能工作，
 		//    只是润色退化为规则清理、上游 ASR/TTS 不可用。
 		try {
-			const dispose = installApiRoutes(scope, normalized, state, delegation, interactions, expertManager, sessionManager, localAsr);
+			const dispose = installApiRoutes(scope, normalized, state, delegation, interactions, expertManager, sessionManager, localAsr, taskManager);
 			scope.effect(() => dispose, "voice-assistant: 本机 API");
 		} catch (error) {
 			scope.logger?.warn?.(`voice-assistant: API 路由注册失败，将退化为纯浏览器语音链路 —— ${error?.message ?? error}`);
