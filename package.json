@@ -69,6 +69,7 @@
 		"probe:expert-cmd": "node tools/cdp-expert-cmd-probe.mjs",
 		"probe:sessions": "node tools/smoke-sessions-http.mjs",
 		"probe:session-cmd": "node tools/cdp-session-cmd-probe.mjs <url>",
+		"probe:session-status": "node tools/cdp-session-status-probe.mjs",
 		"probe:asr-selector": "node tools/cdp-asr-selector-probe.mjs <url>"
 	}
 }

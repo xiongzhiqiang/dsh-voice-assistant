@@ -493,7 +493,13 @@ function ExpertSessionsSection(props) {
 								if (sessions.length === 0) return null;
 								return h(
 									"div",
-									{ className: "xfv-expert-sessions-group", key: worker.id },
+									{
+										className: "xfv-expert-sessions-group",
+										key: worker.id,
+										// 探针锚点 + 样式钩子：按专家定位一组会话行。
+										"data-xfv": "session-group",
+										"data-worker": worker.id,
+									},
 									h(
 										"div",
 										{ className: "name" },
@@ -513,6 +519,9 @@ function ExpertSessionsSection(props) {
 												className: "xfv-session-row",
 												key: session.sessionId,
 												"data-status": session.status ?? (session.active ? "active" : "suspended"),
+												// 探针锚点：真浏览器验证要能定位"哪个专家的哪一行"。
+												"data-xfv": "session-row",
+												"data-session-id": session.sessionId,
 											},
 											h(
 												"span",
@@ -541,6 +550,9 @@ function ExpertSessionsSection(props) {
 															key: option.status,
 															// 当前状态高亮；已是活跃再点活跃无意义但无害（幂等）。
 															"data-on": (session.status ?? (session.active ? "active" : "suspended")) === option.status ? "true" : "false",
+															// 探针锚点：`[data-xfv="session-pick"][data-status-pick="suspended"]`
+															"data-xfv": "session-pick",
+															"data-status-pick": option.status,
 															disabled: busy,
 															onClick: () => pick(worker.id, session.sessionId, option.status),
 														},

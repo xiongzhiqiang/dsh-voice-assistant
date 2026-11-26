@@ -194,6 +194,28 @@ check("设为挂起", parseSessionCommand("把小因的会话2设为挂起")?.st
 check("设为挂起带序号", parseSessionCommand("把小因的会话2设为挂起")?.index, 2);
 check("改成活跃", parseSessionCommand("小因的会话改成活跃")?.status, "active");
 check("标记为完结", parseSessionCommand("小因的会话标记为完结")?.status, "finished");
+
+// ── ⑨b V2.4 回归：后置语序的 expertLabel 必须干净 ──────────────────────
+//
+// 这一段是**真机踩出来的回归**（2026-11-26）：原测试只断言了 `status`，
+// 于是 group1 里粘上的「把」/「将」/「请把」一路带到 `resolveExpertByIdOrLabel`
+// → 找不到专家 → 用户听到"没找到专家"，而单测全绿。
+// 教训：解析类的断言必须把**每个产出字段**都钉住，只钉一个字段等于没测。
+check("把X的会话设为Y → 专家名不带「把」", parseSessionCommand("把小因的会话3设为挂起")?.expertLabel, "小因");
+check("将X的会话设为Y → 专家名不带「将」", parseSessionCommand("将小因的会话3设为挂起")?.expertLabel, "小因");
+check("帮我把X的会话设为Y → 专家名干净", parseSessionCommand("帮我把小因的会话3设为完结")?.expertLabel, "小因");
+check("后置语序序号仍正确", parseSessionCommand("把小因的会话3设为挂起")?.index, 3);
+check("后置语序状态仍正确", parseSessionCommand("把小因的会话3设为挂起")?.status, "suspended");
+// 中间动词可省 —— 中文更短的说法里状态词本身就是动词。
+check("请把X的会话挂起（无「设为」）", parseSessionCommand("请把小因的会话3挂起")?.status, "suspended");
+check("请把…专家名干净", parseSessionCommand("请把小因的会话3挂起")?.expertLabel, "小因");
+check("把X会话挂起（无序号）", parseSessionCommand("把基因分析会话挂起")?.status, "suspended");
+check("把X会话挂起专家名", parseSessionCommand("把基因分析会话挂起")?.expertLabel, "基因分析");
+check("请挂起X的会话（前置带敬语）", parseSessionCommand("请挂起小因的会话")?.expertLabel, "小因");
+// 尾锚防误判：状态词出现在疑问/陈述句里不能被当成命令。
+check("「完成了吗」不当命令", parseSessionCommand("小因的会话完成了吗"), null);
+check("「会话3完成了吗」不当命令", parseSessionCommand("小因的会话3完成了吗"), null);
+
 // 不误判
 check("挂起状态不是关闭", parseSessionCommand("挂起小因的会话")?.kind !== "session-close", true);
 check("关闭不是状态命令", parseSessionCommand("关闭小因会话")?.kind, "session-close");
