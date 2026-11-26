@@ -77,6 +77,33 @@ check("默认目录以 voice-assistant/experts 结尾", defaultExpertDir().endsW
 	check("手工新增 JSON 同步进花名册", normalized.routing.workers.map((w) => w.id), ["general", "chem", "phys"]);
 	check("手工新增报 added=phys", manual.added, ["phys"]);
 	check("手工新增不误报 removed", manual.removed, []);
+	check("纯新增不报 changed", manual.changed, []);
+
+	// ── V2.4：同 id 改定义必须被检出（不能静默不生效）─────────────────────
+	//
+	// 真机踩到的场景：把 genetic 的技能名写错，health 的 skills.missing 一直
+	// 挂着旧值、日志一声不响，用户以为"改了没用是 bug"。
+	// 已建 agent 的 persona/技能在 setup 时就固定了，改定义**不会**重建它 ——
+	// 所以至少要把变更**检出来 + 告警**，而不是当没变化。
+	{
+		const changedExpert = { ...EXPERT("phys", "小物 · 物理"), skills: ["physics-lab"], description: "改了描述" };
+		writeFileSync(join(dir, "phys.json"), JSON.stringify(changedExpert), "utf8");
+		const diff = await manager.applyChanges();
+		check("定义变更被检出", diff.changed.map((c) => c.id), ["phys"]);
+		check("变更字段含 skills", diff.changed[0].fields.includes("skills"), true);
+		check("变更字段含 description", diff.changed[0].fields.includes("description"), true);
+		check("改定义不算增删", [diff.added.length, diff.removed.length], [0, 0]);
+		// 花名册要跟着更新（routes 的 prompt roster 用的是这份），否则路由
+		// 描述与实际定义漂移。
+		check(
+			"花名册里的技能声明已更新",
+			(normalized.routing.workers.find((w) => w.id === "phys")?.skills ?? []),
+			["physics-lab"],
+		);
+		// 原样再存一次 → 无变更、不误报（幂等重扫不能刷日志）。
+		const idle = await manager.applyChanges();
+		check("同内容重扫不报 changed（幂等）", idle.changed, []);
+	}
 
 	// ③ 删除专家 → 必须删掉目录 JSON。
 	const removed = await manager.remove("chem");

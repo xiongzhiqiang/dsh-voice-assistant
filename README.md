@@ -323,7 +323,14 @@ transcriptome-expert / protein-designer）—— 那是 DSH 自带团队功能�
 与既有"丢 JSON 即生效"的扩展入口**完全同源**——管理接口只是替用户做校验与
 原子写入，没有第二套真相来源。写完后用原始配置重扫 + 原地更新
 `config.routing.workers`：新增的当场建 agent 并注册委托中枢，删除的从派单表
-注销。因此增删改**当场可用**，重启后仍持久（真机冒烟已验证 health 清单热更新）。
+注销。因此**增删当场可用**，重启后仍持久（真机冒烟已验证 health 清单热更新）。
+
+> **改定义（同 id 换 persona / skills / label / description）不会重建已建的
+> agent** —— agent 的人格与技能在它的 `setup()` 里固定，已建的走
+> `ensurePersistentAgent` 的 `get` 分支被直接复用。花名册与 health 会立即更新
+> （路由 prompt 的 roster、`skills.missing` 都跟着变），但**已在跑的 agent
+> 仍是旧人格/旧技能**。V2.4 起 applyChanges 会检出这类变更并明确告警，
+> 不再静默；要让新定义真正生效需**重启 DSH**。
 
 安全约束：id 只允许 `[a-z0-9][a-z0-9_-]*`（杜绝路径穿越），general 不可删，
 写入走"临时文件 + rename"原子替换。

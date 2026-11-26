@@ -136,19 +136,46 @@ try {
 		notOk.length === 0,
 		notOk.map((w) => `${w.id}:${byWorker.get(w.id)?.error ?? byWorker.get(w.id)?.ok}`).join(" | "),
 	);
+
+	// 技能分两层判 —— 混在一起会把"用户数据笔误"误报成"代码坏了"：
+	//
+	//   * **代码不变量**（硬断言）：凡是**在技能目录里找得到**的声明技能，
+	//     都必须真的注册进 agent。违反它意味着"扫到了却没挂上"——
+	//     那是真 bug（或谎报可用）。
+	//   * **数据质量**（只报信息）：声明了但目录里没有的技能，进 `missing`。
+	//     这是**用户的活**（装技能或改正技能名），不是代码缺陷 —— 硬断言它
+	//     会让冒烟在用户写错一个字时全红，而那条红诊断不出任何代码问题
+	//     （与上面"不硬编码专家"是同一类取舍）。
+	const codeViolations = [];
+	const dataGaps = [];
+	for (const w of roster) {
+		const s = byWorker.get(w.id)?.skills ?? {};
+		const available = Array.isArray(s.available) ? s.available : [];
+		const registered = Array.isArray(s.registered) ? s.registered : [];
+		for (const name of available) {
+			if (!registered.includes(name)) codeViolations.push(`${w.id}:${name}`);
+		}
+		for (const name of s.missing ?? []) dataGaps.push(`${w.id}:${name}`);
+	}
 	check(
-		"没有声明了却挂不上的技能",
-		roster.every((w) => ((byWorker.get(w.id)?.skills?.missing ?? []).length === 0)),
-		roster.map((w) => `${w.id}:${JSON.stringify(byWorker.get(w.id)?.skills?.missing ?? null)}`).join(" | "),
+		"目录里找得到的声明技能都注册进了 agent（不谎报可用）",
+		codeViolations.length === 0,
+		codeViolations.join(" | "),
 	);
-	// 声明的技能确实被注册了（`missing` 为空即等价，但这条把"注册"与"可用"分开钉住）。
-	const declared = roster.flatMap((w) => byWorker.get(w.id)?.skills?.declared ?? []);
-	const registeredSkills = roster.flatMap((w) => byWorker.get(w.id)?.skills?.registered ?? []);
+	// 声明的技能确实被注册了（`available ⊆ registered` 的等价面：registered 不凭空多出）。
 	check(
-		"声明的技能都真的注册进了 agent",
-		declared.every((name) => registeredSkills.includes(name)),
-		`declared=${declared.join(",")} / registered=${registeredSkills.join(",")}`,
+		"注册的技能都在声明清单里（不凭空多挂）",
+		roster.every((w) => {
+			const s = byWorker.get(w.id)?.skills ?? {};
+			const declared = Array.isArray(s.declared) ? s.declared : [];
+			return (s.registered ?? []).every((name) => declared.includes(name));
+		}),
+		roster.map((w) => `${w.id}:${JSON.stringify(byWorker.get(w.id)?.skills?.registered ?? null)}`).join(" | "),
 	);
+	if (dataGaps.length > 0) {
+		// 只提示、不判红：用户装好技能或改正技能名之后这里自然为空。
+		console.log(`      提示：有声明了但未安装的技能（不是代码问题，装好或改正技能名即可）：${dataGaps.join(", ")}`);
+	}
 	const skills = health?.skills ?? {};
 	check("内置技能目录被扫到", (skills.total ?? 0) >= 1, JSON.stringify(skills.names));
 	check("内置技能目录路径可见", typeof skills.builtinDir === "string" && skills.builtinDir !== "", String(skills.builtinDir));
