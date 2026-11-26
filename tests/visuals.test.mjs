@@ -13,6 +13,7 @@ import {
 	toggleMinimized,
 } from "../src/client/ui/expert-visual.js";
 import { clientConfig, normalizeConfig } from "../lib/config.js";
+import { PLUGIN_VERSION } from "../lib/version.js";
 import { existsSync, readFileSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -46,7 +47,13 @@ check("未知 id 的 URL 也安全", avatarUrl("/api", "../secret"), "/api/avata
 // 打包清单必须含 assets/ —— 漏了它 junction 安装看不出问题、
 // 打包安装后所有图像全消失（V1.4 的 skills/ 就是这个坑）。
 check("files 清单含 assets/", pkg.files.includes("assets/"), true);
-check("版本号与 lib/version.js 一致", pkg.version, "2.4.0");
+
+// 版本号两处必须一致：`package.json` 是发布口径，`lib/version.js` 是运行时
+// health 的口径。原先这里写死了期望值，于是**每次升版本都要改测试**
+// （V2.3.1 / V2.4 / V2.4.1 都踩过），断言名却叫"与 lib/version.js 一致"
+// —— 名不副实。改为真的去比这两处，语义才对，也不再需要随版本改测试。
+check("版本号与 lib/version.js 一致", pkg.version, PLUGIN_VERSION);
+check("版本号形如 x.y.z", /^\d+\.\d+\.\d+$/.test(pkg.version), true);
 
 // 六张素材必须都真实存在且带 alpha（抠过图），否则运行期会出白底方块。
 const ASSET_DIR = join(process.cwd(), "assets", "characters");

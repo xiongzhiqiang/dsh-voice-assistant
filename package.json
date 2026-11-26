@@ -1,6 +1,6 @@
 {
 	"name": "dsh-voice-assistant",
-	"version": "2.4.0",
+	"version": "2.4.1",
 	"description": "「小凤」always-on voice assistant for DeepSeek Harness: wake-word standby, speech transcription with LLM polish, voice-driven multi-turn session dialogue, spoken replies, and a 60s idle-sleep cycle that wakes on a chime or an incoming agent message.",
 	"type": "module",
 	"main": "index.js",

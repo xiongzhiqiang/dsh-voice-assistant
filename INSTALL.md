@@ -172,7 +172,9 @@ V1.8 常用项：
 }
 ```
 
-四个入口都汇到同一份文件、且**当场生效（约 250ms，无需重启）**：
+四个入口都汇到同一份文件。**增删当场生效（约 250ms，无需重启）；改定义（同 id 换
+persona / skills / label / description）需重启 DSH** —— 已建 agent 的人格与技能在
+它的 `setup()` 里固定，`applyChanges` 只能更新花名册与 health 并告警，不会重建 agent。
 
 | 入口 | 做法 |
 |---|---|
@@ -271,7 +273,7 @@ npm run probe:session-cmd -- "<带 token 的 URL>"   # 语音会话命令
 # 1) 取 token（按 mtime 取最新日志里的 token）
 # 2) GET /?token=xxx → 303 + Set-Cookie
 # 3) 带 cookie 访问：/plugins/dsh-voice-assistant/api/health
-#    期望：HTTP 200、version=2.4.0、ok=true、problems=[]、asrLocal.native 两项为 true
+#    期望：HTTP 200、version=2.4.1、ok=true、problems=[]、asrLocal.native 两项为 true
 ```
 
 ---
@@ -370,7 +372,7 @@ asr:
 
 ## 9. 版本
 
-`2.4.0` · MIT License · 详细变更与历史踩坑见 [README.md](./README.md)。
+`2.4.1` · MIT License · 详细变更与历史踩坑见 [README.md](./README.md)。
 
 V2.4（本版）回到 V2.2 基线做了四件事：面板顶部防溢出（关闭按钮不再被内容顶出
 视口）、专家桌宠放大一倍、会话按任务名命名（不再叫「默认会话」）、**会话状态机**
