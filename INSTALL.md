@@ -1,6 +1,6 @@
 # 「小凤」语音助手 —— 安装与使用说明
 
-> 适用版本：**V2.3.0**（专家任务台账 + 任务归属判定；会话按任务名命名；桌宠尺寸翻倍；设置面板防溢出）
+> 适用版本：**V2.0.0**（接入官方 SenseVoice 识别 + UI 自主选择识别方式/语言）
 > 项目：`dsh-voice-assistant` —— 一个 DeepSeek Harness（DSH）bundle 插件。
 
 它把 DSH 从「打字对话」变成「对着电脑说话」：**常驻待机 → 喊「小凤」唤醒 →
@@ -14,8 +14,7 @@
 |---|---|---|
 | **小凤 / router** | 语音入口 + 意图路由（根 agent），负责听、润色、派单、按时间播报要点 | 不是干活的执行者 |
 | **专家 / worker** | 后台常驻的领域 agent（基因分析、病理、蛋白设计…），真正执行任务 | 与 DSH 原生「智能体团队」是**两套独立机制** |
-| **会话 / session** | 运行时资源。每位专家可有多个会话（首个任务落进来时按任务名命名，未派过任务时叫「待命」），有跨会话记忆摘要 | V1.8 起不再与专家一对一硬绑定 |
-| **任务 / task** | V2.3 起专家有自己的**任务台账**：记住接过哪些活、各在哪个会话。新消息先判归属（接着旧任务 or 开新任务） | 不是 DSH 的任务系统，仅本插件内部记账 |
+| **会话 / session** | 运行时资源。每位专家可有多个会话（默认会话 + 按需新建），有跨会话记忆摘要 | V1.8 起不再与专家一对一硬绑定 |
 
 V1.8 已把插件专家系统和 DSH 自带的团队功能彻底隔离：常驻助手在全新干净的
 `session-voice-assistant-root-v2` 会话里启动，不带任何 team 事件。
@@ -108,7 +107,7 @@ V1.8 常用项：
       keepWakeWord: false               # false=休眠真关麦（喊不醒，需点球/快捷键）
       chime: true                       # 唤醒/休眠提示音
     asr:
-      engine: 'sensevoice'              # auto | ears(内置Whisper) | sensevoice(内置) | webspeech | http
+      engine: 'auto'                    # auto | ears | webspeech | http
     tts:
       engine: 'browser'                 # browser=系统语音零延迟 | http
     turn:
@@ -147,22 +146,14 @@ V1.8 常用项：
 **状态点颜色**：绿=待机、蓝=在听、橙=思考、紫=播报、灰=休眠。
 气泡显示待提交内容 + 倒计时，或实时字幕。
 
-> **设置面板不会跑出屏幕（V2.3）**：面板加了 `max-height: calc(100dvh - 120px)` 与内部
-> 滚动，标题栏（含关闭按钮）改为 `sticky` 吸顶，内容再多也不会把关闭按钮顶出可视区。
-
-### 4.0 专家桌宠（V1.9 起；V2.3 尺寸翻倍）
+### 4.0 专家桌宠（V1.9）
 
 - **空闲看不到、工作才出现**：没有专家在干活时，页面上一张桌宠都没有；一旦派单给
   某位专家，它才从左侧滑入 + 轻微弹跳冒出来，任务结束自动收起。
 - **透明底**：桌宠形象是透明背景的卡通图，没有白色卡片边框，直接浮在界面上。
 - **单个控制**：每张桌宠右上角有自己的「−」按钮，可单独收起这位专家（不影响其它）；
   位置可各自拖拽，拖过的位置会记住。收起只在本任务内生效，任务结束自动恢复。
-- **尺寸（V2.3）**：图像从 64×64 放大到 **128×128**（名字行与最小化按钮同步放大），
-  默认纵向间距随之由 90 调到 164，避免糊到一起。
 - hover 桌宠可看到它当前正在处理的任务。
-
-> 想再调尺寸：`src/client/ui/expert-visual.js` 的 `EXPERT_SIZE` / `DEFAULT_LAYOUT`
-> 与 `src/client/ui/styles.js` 里三处宽高必须**同步改**（文件内有对照注释钉死）。
 
 ### 4.1 专家管理（V2.2：唯一真相源 + 实时同步）
 
@@ -200,36 +191,44 @@ V1.8 常用项：
 - 目录不存在属正常初始态，不会报假红；`routing.workers` / `routing.experts`
   内联清单只在目录全部不可读时作兼容兜底，不再作为配置入口。
 
-### 4.2 会话管理（V2.3：按任务名命名）
+### 4.2 会话管理（V1.8；V2.4 加状态机）
 
-每位专家的会话不再叫「默认会话」——**占位名是「待命」，第一个任务落进来时按任务名自动命名**。
-派单时可指定投到哪个会话（省略则先走任务归属判定，再决定回老会话还是开新会话）。
+每位专家有若干会话，可按需新建/切换/关闭；派单可指定投到哪个会话。
 
 - 语音：「列出会话」「给小因开个会话」「切换到小因会话」「关闭小因会话 2」
 - HTTP：`GET /sessions`、`POST /sessions/<id>`、`POST /sessions/<id>/switch`、
-  `POST /sessions/<id>/rename`（body `{sessionId,label}`，手动改名）、
+  `POST /sessions/<id>/status`、`POST /sessions/<id>/rename`、
   `DELETE /sessions/<id>/<sid>`；`POST /delegate` 可带 `sessionId` 指定会话。
 
 专家记忆是**每专家一份跨会话摘要**：派单时注入、完成后回写要点，所以新会话也能
 接上这位专家此前在别的会话做过的事。
 
-### 4.2.1 任务台账与任务归属（V2.3）
+#### 4.2.1 会话状态（V2.4 需求④）
 
-专家每收到一条消息都会先判一次**「这条说的是哪件旧事？」**：
+每个会话有三个状态，**每位专家同时只有一个活跃会话**：
 
-| 判定结果 | 行为 | 口头回报 |
+| 状态 | 含义 | 会接任务吗 |
 |---|---|---|
-| 接着旧任务 | 投回那件任务原本的会话 | 「已接着小因的任务『差异基因火山图』继续」 |
-| 新任务 | 新开一个会话，**用任务名给它命名** | 「已为小因开新任务『比对两个转录组』」 |
-| 判不出来 / 模型不可用 | 投活跃会话（不拒绝派单） | 只报专家名，不提任务 |
+| 活跃 | 当前接受语音派单的会话 | 会 |
+| 挂起 | 保留上下文，暂不接任务 | 不会 |
+| 完结 | 任务已交差，保留在列表备查 | 不会 |
 
-判定是三段式：规则强命中（文本相似度 ≥ 0.62）→ 模型判一次（只认台账里已有的 taskId）
-→ 规则弱兜底（≥ 0.34）。台账为空时直接开新任务，不做无用的模型调用。
+两种改法（都要**你确认**才生效，系统不会自己改）：
 
-- 只读接口：`GET /tasks`（全部专家）、`GET /tasks/<taskId>`；`GET /health` 的 `tasks` 段。
-- 台账文件：`<expertDir>/_state/tasks.json`（与 `sessions.json` 同目录），每位专家上限 24 件。
-- **逃生口**：`POST /delegate` 带 `"attribute": false` 可完全跳过判定、强制投指定会话。
-- 状态面板（长按语音球）里有一行「任务归属」，显示最近一次判定的结果。
+- **面板**：长按语音球 → 「管理专家会话…」→ 每个会话右边三颗按钮
+  「活跃 / 挂起 / 完结」，点一下即生效，当前状态那颗会高亮。
+- **语音**：「挂起小因的会话」「把小因的会话2设为挂起」「完结基因会话」
+  「激活小因的会话」。
+
+几条行为约定：
+
+- 切换活跃时，**原来那个活跃的自动变挂起**（不删，随时能切回来）。
+- **「完结」和「关闭」是两件事**：完结只是标记（会话还在列表里），关闭是把它
+  从列表移除。完结的会话**可以再改回活跃**。
+- 挂起/完结掉最后一个活跃会话后，该专家就"没有活跃会话"了 —— 这时**下一个
+  派给它的任务会自动新开一个会话**，并用任务名命名（比如「分析这批数据」）。
+- 新建的会话如果还没派过活，名字显示为「待命」；派第一个任务时自动换成任务名。
+  你自己改过的名字不会被任务名覆盖。
 
 ### 4.3 常见问题
 
@@ -250,7 +249,7 @@ V1.8 常用项：
 改完代码先跑纯逻辑层（不需要 DSH 在跑）：
 
 ```sh
-npm test                    # 11 个测试文件全绿
+npm test                    # 7 个测试文件全绿
 node build.mjs --check      # 只校验不写盘
 npm run verify              # 会话完整性 + 宿主半冒烟 + agent 路由
 ```
@@ -272,12 +271,12 @@ npm run probe:session-cmd -- "<带 token 的 URL>"   # 语音会话命令
 # 1) 取 token（按 mtime 取最新日志里的 token）
 # 2) GET /?token=xxx → 303 + Set-Cookie
 # 3) 带 cookie 访问：/plugins/dsh-voice-assistant/api/health
-#    期望：HTTP 200、version=2.3.0、ok=true、problems=[]、asrLocal.native 两项为 true
+#    期望：HTTP 200、version=2.4.0、ok=true、problems=[]、asrLocal.native 两项为 true
 ```
 
 ---
 
-## 6. 目录结构（V2.3）
+## 6. 目录结构（V2.2）
 
 ```
 index.js                     插件入口：装配宿主半
@@ -289,12 +288,9 @@ lib/
   workers.js  agent.js      general 锚点 + 目录 JSON 扫描 / agent 定义
   expert-registry.js        目录 JSON 的 CRUD + 校验 + 原子写盘
   expert-manager.js         增删落盘 + 原地 splice 热生效 + fs.watch 目录监听
-  expert-sessions.js        会话注册表 + 跨会话记忆摘要（<expertDir>/_state/sessions.json）
-  expert-tasks.js           任务台账（<expertDir>/_state/tasks.json）+ 相似度纯函数
-  task-route.js             任务归属判定：规则强/弱阈值 + 模型裁决 + 白名单解析
-  task-manager.js           任务归属中枢：回原会话 / 开新会话并命名 / 退活跃会话
-  session-manager.js        会话管理中枢（HTTP 与语音命令共用）
-  routes.js                 HTTP 路由（health/experts/sessions/tasks/delegate…）
+  expert-sessions.js        会话注册表 + 三态状态机 + 按任务名命名 + 跨会话记忆摘要（<expertDir>/_state/sessions.json）
+  session-manager.js        会话管理中枢（状态写入口 + 派单落点判定；HTTP 与语音命令共用）
+  routes.js                 HTTP 路由（health/experts/sessions/delegate…）
   report.js  interactions.js 要点汇报队列 / 统一互动流
   skills.js                 专家技能注册
   avatars.js  activities.js 素材白名单路由 / 专家忙闲投影
@@ -302,7 +298,6 @@ lib/
   asr/runtime.js             内置识别服务（可用性/子进程生命周期/转写）
   asr/worker.js              SenseVoice / Whisper 推理子进程
 src/client/                  客户端半（状态机/唤醒/采集/TTS/浮层 UI）
-  ui/expert-visual.js        桌宠显隐/排布纯函数（尺寸与间距的唯一来源）
 skills/somatic-mutation-report/  内置基因分析技能
 assets/characters/           专家卡通素材（Q 版透明底 PNG）
 vendor/node_modules/         内置识别的 vendored 原生包（随源码入库）
@@ -350,7 +345,7 @@ tests/  tools/               单测 / 冒烟探针 / 会话自检工具
 
 ```yaml
 asr:
-  engine: sensevoice   # auto / webspeech / ears(内置Whisper) / sensevoice(内置) / http
+  engine: auto          # auto / webspeech / ears(内置Whisper) / sensevoice(内置) / http
   local:
     enabled: true
     whisperModel: small # tiny / base / small / medium / large / turbo
@@ -367,12 +362,17 @@ asr:
 - 换平台时按 `vendor/README.md` 替换平台原生包；缺包时状态接口会明确报
   `native-runtime-missing`，不会静默不可用。
 
-> **当前配置（2026-11-25，V2.3）**：`asr.engine` 已固定为本地 **SenseVoice**（断网也能识别，
-> 且不受浏览器 Web Speech 可用性影响）；UI 里仍可随时切换或改回「自动」。两条本地链都在
-> 本项目的子进程里跑，模型在 `.data/asr/`，与两个外部插件的安装状态无关。
+> **当前配置（2026-11-25，V2.1）**：识别基线仍是浏览器 Web Speech；受限网络下
+> `asr-unreachable` → 死名单 → 自动切到内置 Whisper（本会话内不切回，避免抖动横跳）。
+> 两条本地链都在本项目的子进程里跑，模型在 `.data/asr/`，与两个外部插件的安装状态无关。
 
 ---
 
 ## 9. 版本
 
-`2.3.0` · MIT License · 详细变更与历史踩坑见 [README.md](./README.md)。
+`2.4.0` · MIT License · 详细变更与历史踩坑见 [README.md](./README.md)。
+
+V2.4（本版）回到 V2.2 基线做了四件事：面板顶部防溢出（关闭按钮不再被内容顶出
+视口）、专家桌宠放大一倍、会话按任务名命名（不再叫「默认会话」）、**会话状态机**
+（每专家唯一活跃会话 + 活跃/挂起/完结三态 + 状态变更由用户确认 + 只有活跃会话
+收任务 + 全不活跃则派单时新开一个）。详见 README 的 V2.4 章节。

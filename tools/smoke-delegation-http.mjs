@@ -117,14 +117,6 @@ try {
 	check("提问播报开着", inter.announceQuestions === true, JSON.stringify(inter.announceQuestions));
 	check("旁听的会话是 5 条（根 agent + 4 位独立 worker）", inter.watching === 5, String(inter.watching));
 
-	// ── 1d. 需求④：任务台账端点可用（这是"任务列表记忆"的对外契约）────
-	const tasksAll = await api("/tasks");
-	check("GET /tasks 成功", tasksAll?.ok === true, JSON.stringify(tasksAll)?.slice(0, 120));
-	check("台账按专家归集", typeof tasksAll?.tasks === "object" && tasksAll.tasks !== null, typeof tasksAll?.tasks);
-	check("health 里也有台账自省", typeof health?.tasks === "object" && health.tasks !== null, typeof health?.tasks);
-	const tasksOne = await api("/tasks/coder");
-	check("GET /tasks/<id> 成功", tasksOne?.ok === true && Array.isArray(tasksOne.tasks), JSON.stringify(tasksOne)?.slice(0, 120));
-
 	// ── 2. 路由 ─────────────────────────────────────────────────────────
 	const routeText = "帮我写一段 Python 代码，打印 hello，然后把代码保存到文件里。";
 	const routed = await api("/route", { method: "POST", body: { text: routeText } });
@@ -152,17 +144,32 @@ try {
 	// `coderTask` 特意让专家**报告自己的目录** —— 这正是需求① 要洗掉的
 	// 东西。于是这条派单同时验证两件事：派单链路通，且路径在播报前被
 	// `condenseArtifacts` 概括掉（下面第 9 条断言）。
+	//
+	// ⚠️ V2.4 起必须**显式指定 sessionId**：省略时宿主会走 需求④ 的落点判定
+	// —— 若该专家没有活跃会话就新开一个，并用**本次任务名**给它命名。冒烟
+	// 的任务名（"请用一句话说明你的当前工作目录是哪个路径…"）会污染用户真实
+	// 的会话列表。显式指定活跃会话就只挂任务、不新建、不改名。
+	const activeSessions = health?.delegation?.activeSessions ?? {};
+	const pinSession = async (workerId) => {
+		let sid = typeof activeSessions[workerId] === "string" ? activeSessions[workerId] : "";
+		if (sid !== "") return sid;
+		// 极少见：该专家当前没有活跃会话。这时退回省略（让宿主新开一个）——
+		// 冒烟本身要能跑通比"绝不新建"更重要，且这正验证了需求④。
+		const view = (await api(`/sessions/${workerId}`))?.sessions?.[workerId];
+		return view?.activeSessionId ?? "";
+	};
 	const coderTask = "请用一句话说明你的当前工作目录是哪个路径；只回答，不要运行写文件或提权的命令。";
 	const researcherTask = "请用一句话说明语音助手里 router 与 worker 的分工，不要修改任何文件。";
 
 	const started = Date.now();
-	// V2.3（需求④）：`attribute:false` = 跳过任务归属判定。冒烟脚本要的是
-	// "派单链路通不通"，不希望每次跑都在专家目录里留下一条新任务会话。
-	const r1 = await api("/delegate", { method: "POST", body: { worker: "researcher", task: researcherTask, attribute: false } });
-	const r2 = await api("/delegate", { method: "POST", body: { worker: "coder", task: coderTask, attribute: false } });
+	const r1 = await api("/delegate", { method: "POST", body: { worker: "researcher", task: researcherTask, sessionId: await pinSession("researcher") } });
+	const r2 = await api("/delegate", { method: "POST", body: { worker: "coder", task: coderTask, sessionId: await pinSession("coder") } });
 	check("researcher 派单当场成功", r1?.ok === true, JSON.stringify(r1));
 	check("coder 派单当场成功", r2?.ok === true, JSON.stringify(r2));
 	check("两次派单都有 jobId", typeof r1?.jobId === "string" && typeof r2?.jobId === "string", `${r1?.jobId} / ${r2?.jobId}`);
+	// 需求④：显式指定会话时不该新开（冒烟不污染用户会话列表）。
+	check("显式指定会话时不新开会话", r1?.openedSession !== true && r2?.openedSession !== true, `${r1?.openedSession} / ${r2?.openedSession}`);
+	check("派单回报了目标会话", typeof r1?.sessionId === "string" && r1.sessionId !== "", String(r1?.sessionId));
 
 	// ── 5. 轮询汇报（按游标增量）──────────────────────────────────────
 	const collected = [];

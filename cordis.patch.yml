@@ -196,11 +196,3 @@
         routing:
           expertDirs:
             - C:\Users\xqz19\.dsh\voice-assistant\experts
-          # ── 任务台账（V2.3）────────────────────────────────────────────
-          #
-          # 每位专家的任务台账落在 <expertDir>/_state/tasks.json，与
-          # sessions.json 同目录，**不需要在这里配**。
-          #
-          # 归属判定阈值（规则强命中 0.62 / 弱兜底 0.34、每位专家上限 24 件）
-          # 目前是代码常量，见 lib/expert-tasks.js。要临时绕过判定、
-          # 强制投指定会话：POST /delegate 的 body 带 "attribute": false。

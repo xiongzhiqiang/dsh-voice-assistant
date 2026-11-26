@@ -46,7 +46,7 @@ check("未知 id 的 URL 也安全", avatarUrl("/api", "../secret"), "/api/avata
 // 打包清单必须含 assets/ —— 漏了它 junction 安装看不出问题、
 // 打包安装后所有图像全消失（V1.4 的 skills/ 就是这个坑）。
 check("files 清单含 assets/", pkg.files.includes("assets/"), true);
-check("版本号与 lib/version.js 一致", pkg.version, "2.3.0");
+check("版本号与 lib/version.js 一致", pkg.version, "2.4.0");
 
 // 六张素材必须都真实存在且带 alpha（抠过图），否则运行期会出白底方块。
 const ASSET_DIR = join(process.cwd(), "assets", "characters");

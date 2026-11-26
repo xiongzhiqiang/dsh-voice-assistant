@@ -397,6 +397,167 @@ function SessionsSection(props) {
 }
 
 /**
+ * V2.4 需求④：专家会话状态区（逐个改 活跃/挂起/完结）。
+ *
+ * ## 为什么和上面的 `SessionsSection` 是两个组件
+ *
+ * `SessionsSection` 管的是**小凤自己的语音去向**（DSH 会话投影：切换到哪个
+ * 会话去说话）。这里是**每位专家名下的会话状态机** —— 两套"会话"概念在
+ * 数据源、操作、后果上都不同，硬合一个组件只会让两边都难懂。
+ *
+ * ## 为什么是独立组件（老坑）
+ *
+ * 同 `SessionsSection`：里面有 `useState` / `useEffect`，而 `renderPanel`
+ * 是"条件调用的普通函数"。hook 必须挂在真正的组件 fiber 上，否则面板开合
+ * 会让 hook 数量变化 → React error #310 → 整个浮层槽崩掉、语音球消失。
+ *
+ * ## 交互约定（需求④原文：状态改变必须由用户确认）
+ *
+ * 每个会话一行，右侧三颗按钮「活跃 / 挂起 / 完结」，**点击即确认**。
+ * 不额外弹确认框：按钮本身就是显式动作，再弹一层是把用户的确认问两遍。
+ * 当前状态那颗按钮高亮（`data-on`），所以"点哪个会变成什么"没有歧义。
+ *
+ * @param props - `{ controller, snapshot }`。
+ */
+function ExpertSessionsSection(props) {
+	const { controller, snapshot } = props;
+	const [open, setOpen] = React.useState(false);
+	const [busy, setBusy] = React.useState(false);
+	const [rows, setRows] = React.useState(null);
+
+	const load = React.useCallback(async () => {
+		setBusy(true);
+		try {
+			setRows(await controller.refreshExpertSessions());
+		} finally {
+			setBusy(false);
+		}
+	}, [controller]);
+
+	// 展开时拉一次（与会话列表同一取舍：展开才付网络代价）。
+	React.useEffect(() => {
+		if (!open) return undefined;
+		load();
+		return undefined;
+	}, [open, load]);
+
+	const view = rows ?? snapshot.expertSessions ?? {};
+	const experts = (controller.config.routing?.workers ?? []).filter((w) => w.id !== "general");
+	const anySession = Object.keys(view).length > 0;
+
+	/** 点状态按钮：交给 controller（它负责调宿主 + 刷新 + 播报）。 */
+	const pick = async (workerId, sessionId, status) => {
+		setBusy(true);
+		try {
+			await controller.setExpertSessionStatus(workerId, sessionId, status);
+			setRows(await controller.refreshExpertSessions());
+		} finally {
+			setBusy(false);
+		}
+	};
+
+	return h(
+		"div",
+		{ className: "xfv-sessions" },
+		h(
+			"div",
+			{ className: "xfv-sessions-head" },
+			h("span", { className: "k" }, "专家会话"),
+			h(
+				"span",
+				{ className: "v" },
+				open ? "改状态后立即生效" : "每位专家同时只有一个活跃会话",
+			),
+		),
+		h(
+			"div",
+			{ className: "xfv-actions" },
+			h(
+				"button",
+				{ type: "button", className: "xfv-btn", onClick: () => setOpen((value) => !value), disabled: busy },
+				open ? "收起专家会话" : "管理专家会话…",
+			),
+			open
+				? h("button", { type: "button", className: "xfv-btn", onClick: load, disabled: busy }, "刷新")
+				: null,
+		),
+		open
+			? h(
+					"div",
+					{ className: "xfv-expert-sessions" },
+					!anySession
+						? h("div", { className: "xfv-hint" }, busy ? "正在读取…" : "还没有专家会话。")
+						: experts.map((worker) => {
+								const entry = view[worker.id];
+								const sessions = entry?.sessions ?? [];
+								if (sessions.length === 0) return null;
+								return h(
+									"div",
+									{ className: "xfv-expert-sessions-group", key: worker.id },
+									h(
+										"div",
+										{ className: "name" },
+										h("span", null, worker.label ?? worker.id),
+										h(
+											"span",
+											null,
+											entry?.activeSessionId
+												? `活跃 ${sessions.findIndex((s) => s.sessionId === entry.activeSessionId) + 1}`
+												: "无活跃会话",
+										),
+									),
+									sessions.map((session) =>
+										h(
+											"div",
+											{
+												className: "xfv-session-row",
+												key: session.sessionId,
+												"data-status": session.status ?? (session.active ? "active" : "suspended"),
+											},
+											h(
+												"span",
+												{ className: "label", title: session.label ?? "" },
+												session.label ?? "未命名",
+											),
+											h(
+												"span",
+												{ className: "st" },
+												{ active: "活跃", suspended: "挂起", finished: "完结" }[
+													session.status ?? (session.active ? "active" : "suspended")
+												] ?? "—",
+											),
+											h(
+												"span",
+												{ className: "picks" },
+												...[
+													{ status: "active", text: "活跃" },
+													{ status: "suspended", text: "挂起" },
+													{ status: "finished", text: "完结" },
+												].map((option) =>
+													h(
+														"button",
+														{
+															type: "button",
+															key: option.status,
+															// 当前状态高亮；已是活跃再点活跃无意义但无害（幂等）。
+															"data-on": (session.status ?? (session.active ? "active" : "suspended")) === option.status ? "true" : "false",
+															disabled: busy,
+															onClick: () => pick(worker.id, session.sessionId, option.status),
+														},
+														option.text,
+													),
+												),
+											),
+										),
+									),
+								);
+							}),
+				)
+			: null,
+	);
+}
+
+/**
  * 把工作目录压短（面板窄，完整路径会撑破布局）。
  * @param cwd - 完整路径。
  * @returns 缩略路径。
@@ -548,15 +709,6 @@ function renderPanel(controller, snapshot, onClose) {
 				? `${snapshot.pendingDelegations} 项处理中（完成后我会汇报要点）`
 				: "无在途任务",
 		),
-		// V2.3（需求④）：最近一次派单落在哪条任务上。这一行是"为什么又多了个
-		// 会话"的唯一可见证据 —— 归属判定把指令并进老任务时会话数不变，
-		// 判成新任务时才多一条；不显示的话用户只能看到侧边栏凭空多一项。
-		row(
-			"任务归属",
-			snapshot.lastTaskTitle === ""
-				? "暂无（还没有派过任务）"
-				: `${snapshot.lastTaskCreated === true ? "新任务" : "接着已有任务"}：${snapshot.lastTaskTitle}`,
-		),
 		// 需求④：三类互动（审批 / 提问 / 汇报）走**同一条按时间的流**，
 		// 这条留的是最近一条的原话。标签随类型变 —— 都写"最近汇报"会让
 		// 用户以为念的是任务结果，实际可能是"某工具需要你去界面允许"。
@@ -610,6 +762,9 @@ function renderPanel(controller, snapshot, onClose) {
 		// 执行它的 useState，React 会直接抛 error #310 把浮层槽打崩。
 		// 详见 SessionsSection 的注释。
 		h(SessionsSection, { controller, snapshot }),
+		// V2.4 需求④：专家会话状态机。与上面那个"语音去向"是两套会话概念，
+		// 故独立成区（见 ExpertSessionsSection 的注释）。
+		h(ExpertSessionsSection, { controller, snapshot }),
 		row("语音会话", snapshot.sessionId === null ? "尚未创建" : String(snapshot.sessionId).slice(0, 8)),
 		snapshot.error !== "" ? row("最近错误", snapshot.error) : null,
 		h(

@@ -338,6 +338,75 @@ function css(accent) {
 .xfv-session-item .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .xfv-session-item .m { color: var(--xfv-sub); font-size: 11px; }
 
+/* ── V2.4 需求④：专家会话状态（逐个可改）────────────────────────── */
+/*
+ * 每个会话一行：左边是名字+状态标，右边三个小按钮（活跃/挂起/完结）。
+ * 用按钮而不是下拉：状态只有三档，点一下就切完，比"展开-选-收起"少两步。
+ * 当前状态那个按钮用 data-on="true" 高亮，一眼看出现在是什么状态。
+ */
+.xfv-expert-sessions {
+	margin-top: 6px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+.xfv-expert-sessions-group { display: flex; flex-direction: column; gap: 4px; }
+.xfv-expert-sessions-group > .name {
+	font-size: 11px;
+	color: var(--xfv-sub);
+	font-weight: 600;
+	display: flex;
+	justify-content: space-between;
+	gap: 8px;
+}
+.xfv-session-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	border: 1px solid var(--xfv-border);
+	border-radius: 8px;
+	padding: 4px 6px;
+}
+.xfv-session-row[data-status="active"] { border-color: var(--xfv-accent); background: rgba(47, 107, 255, 0.07); }
+.xfv-session-row[data-status="finished"] { opacity: 0.62; }
+.xfv-session-row .label {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 12px;
+}
+.xfv-session-row .st {
+	flex: none;
+	font-size: 10px;
+	padding: 1px 5px;
+	border-radius: 999px;
+	border: 1px solid var(--xfv-border);
+	color: var(--xfv-sub);
+}
+.xfv-session-row[data-status="active"] .st { color: var(--xfv-accent); border-color: var(--xfv-accent); }
+.xfv-session-row .picks { display: flex; flex: none; gap: 3px; }
+.xfv-session-row .picks button {
+	pointer-events: auto;
+	font-family: inherit;
+	font-size: 10px;
+	padding: 2px 5px;
+	border-radius: 6px;
+	border: 1px solid var(--xfv-border);
+	background: transparent;
+	color: var(--xfv-sub);
+	cursor: pointer;
+}
+.xfv-session-row .picks button:hover { border-color: var(--xfv-accent); color: var(--xfv-accent); }
+.xfv-session-row .picks button[data-on="true"] {
+	background: var(--xfv-accent);
+	border-color: var(--xfv-accent);
+	color: #fff;
+	font-weight: 600;
+}
+.xfv-session-row .picks button[data-danger="true"]:hover { border-color: #d92d20; color: #d92d20; }
+
 /* ── 专家桌宠层（V1.9：透明底 + 空闲隐藏 + 单个控制）──────────── */
 /*
  * V1.9 关键变化：

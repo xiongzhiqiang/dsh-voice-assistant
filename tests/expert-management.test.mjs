@@ -180,6 +180,26 @@ check("列出专家不误判为会话命令", parseSessionCommand("列出专家"
 check("会话错误播报", formatSessionSpeech({ ok: false, error: "last-session" }, "session-close"), "这是最后一个会话，得留一个。");
 check("会话成功播报", formatSessionSpeech({ ok: true, speech: "好了。" }, "session-create"), "好了。");
 
+// ── ⑨ V2.4 需求④ 会话状态语音命令 ─────────────────────────────────────
+// 前置语序
+check("挂起X的会话", parseSessionCommand("挂起小因的会话")?.kind, "session-status");
+check("挂起 → suspended", parseSessionCommand("挂起小因的会话")?.status, "suspended");
+check("挂起带专家名", parseSessionCommand("挂起小因的会话")?.expertLabel, "小因");
+check("挂起带序号", parseSessionCommand("挂起小因的会话2")?.index, 2);
+check("完结X会话", parseSessionCommand("完结基因会话")?.status, "finished");
+check("激活X会话", parseSessionCommand("激活小因的会话")?.status, "active");
+check("恢复X会话", parseSessionCommand("恢复小因会话")?.status, "active");
+// 后置语序
+check("设为挂起", parseSessionCommand("把小因的会话2设为挂起")?.status, "suspended");
+check("设为挂起带序号", parseSessionCommand("把小因的会话2设为挂起")?.index, 2);
+check("改成活跃", parseSessionCommand("小因的会话改成活跃")?.status, "active");
+check("标记为完结", parseSessionCommand("小因的会话标记为完结")?.status, "finished");
+// 不误判
+check("挂起状态不是关闭", parseSessionCommand("挂起小因的会话")?.kind !== "session-close", true);
+check("关闭不是状态命令", parseSessionCommand("关闭小因会话")?.kind, "session-close");
+check("普通句子不误判为状态命令", parseSessionCommand("帮我挂起这个进程"), null);
+check("状态错误播报", formatSessionSpeech({ ok: false, error: "invalid-status" }, "session-status"), "状态只支持活跃、挂起、完结三种。");
+
 if (failures.length > 0) {
 	console.error(`\n${failures.length} 项失败`);
 	for (const f of failures) console.error(`  - ${f.name}: ${JSON.stringify(f.actual)} != ${JSON.stringify(f.expected)}`);

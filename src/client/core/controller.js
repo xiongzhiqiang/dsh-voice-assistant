@@ -58,6 +58,7 @@ import {
 	polish, route, delegate, reports as fetchReports, interactions as fetchInteractions,
 	listExperts, addExpert, removeExpert,
 	listSessions, createSession, switchSession, closeSession,
+	setSessionStatus, renameSession,
 	log, warn,
 } from "./runtime.js";
 import { parseExpertCommand, formatCommandSpeech, parseSessionCommand, formatSessionSpeech } from "./expert-commands.js";
@@ -72,6 +73,15 @@ const NOTICE_TTL_MS = 4200;
 
 /** 语音历史保留条数（HUD 只显示最近几条）。 */
 const HISTORY_LIMIT = 4;
+
+/** V2.4：会话状态 → 中文（与宿主 `SESSION_STATUS_LABEL` 同口径）。 */
+function statusWord(session) {
+	if (session?.status === "active" || session?.active === true) return "活跃";
+	if (session?.status === "finished") return "完结";
+	if (session?.status === "suspended") return "挂起";
+	// 老宿主没有 status 字段：按 active 布尔反推，不谎报"挂起"。
+	return session?.active === true ? "活跃" : "挂起";
+}
 
 /** 语音控制器。 */
 export class VoiceController {
@@ -123,15 +133,6 @@ export class VoiceController {
 			routedWorker: "",
 			routeVia: "",
 			/**
-			 * V2.3（需求④）：最近一次派单的**任务归属**结果。
-			 * `lastTaskTitle` 是那条任务的名称（老任务用它的原名、新任务用新起的
-			 * 任务名）；`lastTaskCreated` 为真表示这次开了新任务/新会话。
-			 * 面板据此显示"接着老任务"还是"新开任务" —— 这是用户判断
-			 * "为什么又多了个会话"的唯一可见线索。
-			 */
-			lastTaskTitle: "",
-			lastTaskCreated: false,
-			/**
 			 * V1.3 委托汇报 / 需求④互动：当前已派给 worker、还在后台执行的任务数（界面显示"处理中"）。
 			 */
 			pendingDelegations: 0,
@@ -152,6 +153,14 @@ export class VoiceController {
 			 * 推一次，UI 才知道要重渲染。跟着 `patch()` 走天然有这两点。
 			 */
 			sessionTarget: { mode: "", label: "尚未建立", id: null },
+			/**
+			 * V2.4 需求④：每位专家名下的会话清单（含 `status`）。
+			 *
+			 * 形状 `{ [workerId]: {sessions:[{sessionId,label,status,active}], activeSessionId} }`。
+			 * 为什么入快照治：面板里的状态按钮要"当前是什么状态"才点得明白，
+			 * 而这个数据来自宿主（每次改完都要重拉），必须由 controller 主动推。
+			 */
+			expertSessions: {},
 			/**
 			 * 当前正等着用户语音作答的问题（没有则为 `null`）。
 			 *
@@ -1306,31 +1315,24 @@ export class VoiceController {
 
 				if (worker !== undefined && worker.id !== "general") {
 					// 真正的专家：提交给宿主后台执行，不切会话、不旁听中间过程。
-					// V2.3（需求④）：宿主侧会先判任务归属 —— 老任务回它原来的会话、
-					// 新任务用任务名开新会话。返回的 attribution 供界面显示"落在哪条任务"。
 					try {
 						const result = await delegate(worker.id, task);
 						if (generation !== this.generation) return;
 						if (result?.ok === true) {
 							delegated = true;
-							const attribution = result.attribution ?? null;
 							this.patch({
 								routedWorker: worker.label,
 								routeVia,
 								pendingDelegations: this.snapshot.pendingDelegations + 1,
 								sessionTarget: this.session.describe(),
-								// 最近一次归属（面板显示"归入已有任务/新任务"）。
-								lastTaskTitle: typeof attribution?.title === "string" ? attribution.title : "",
-								lastTaskCreated: attribution?.created === true,
 							});
-							// 播报口径要说清"是接着老任务做，还是开了新任务" ——
-							// 用户听到"已交给阿码处理"时脑子里真正想知道的就是这个。
+							// V2.4 需求④：该专家当时没有活跃会话 → 宿主新开了一个。
+							// 必须说出来，否则用户不知道"任务跑哪去了"（新会话在
+							// 侧边栏里多出来一条，不提示会以为是系统乱建）。
 							this.notice(
-								attribution === null
-									? `已交给${worker.label}处理，完成后我会汇报要点。`
-									: attribution.created === true
-										? `已为${worker.label}开新任务「${attribution.title}」，完成后我会汇报要点。`
-										: `已接着${worker.label}的任务「${attribution.title}」继续，完成后我会汇报要点。`,
+								result.openedSession === true
+									? `${worker.label}当时没有活跃会话，已新开一个会话交给它处理。`
+									: `已交给${worker.label}处理，完成后我会汇报要点。`,
 								"info",
 							);
 							// 立刻探一次（worker 可能几百毫秒就完成），并启动轮询。
@@ -1449,7 +1451,15 @@ export class VoiceController {
 				for (const [id, view] of Object.entries(sessions)) {
 					const worker = (this.config.routing?.workers ?? []).find((w) => w.id === id);
 					const label = worker?.label ?? id;
-					const list = (view.sessions ?? []).map((s, i) => `${i + 1}${s.active ? "（当前）" : ""}`).join("、");
+					// V2.4：逐条念出**会话名 + 状态**，不再只说序号 —— 用户要
+					// 判断"哪个该激活"必须知道每个会话在干什么、现在什么状态。
+					const list = (view.sessions ?? [])
+						.map((s, i) => {
+							const status = statusWord(s);
+							const mark = s.active === true || s.status === "active" ? "（当前活跃）" : `（${status}）`;
+							return `${i + 1}、${s.label ?? "未命名"}${mark}`;
+						})
+						.join("；");
 					parts.push(`${label}：${list || "无"}`);
 				}
 				result = { ok: data?.ok === true, ...data };
@@ -1488,6 +1498,21 @@ export class VoiceController {
 						} else {
 							result = await closeSession(id, target);
 							speech = result?.ok === true ? `已关闭${worker.label}的一个会话。` : formatSessionSpeech(result, "session-close");
+						}
+					} else if (command.kind === "session-status") {
+						// V2.4 需求④：改状态走 setSessionStatus（宿主唯一写入口）。
+						const data = await listSessions(id);
+						const view = data?.sessions?.[id];
+						const sessions = (view?.sessions ?? []).map((s) => s.sessionId);
+						const target = this.pickSessionId(sessions, command.index, view?.activeSessionId);
+						if (!target) {
+							result = { ok: false, error: "session-not-found" };
+							speech = formatSessionSpeech(result, "session-status");
+						} else {
+							result = await setSessionStatus(id, target, command.status);
+							speech = result?.ok === true
+								? (result.speech ?? `已改好${worker.label}的会话状态。`)
+								: formatSessionSpeech(result, "session-status");
 						}
 					}
 				}
@@ -1864,6 +1889,77 @@ export class VoiceController {
 		this.notice("已开一个新会话，接下来我说的都进这里。", "info");
 		await this.session.ensure({ open: true });
 		return id;
+	}
+
+	/** ── V2.4 需求③④：专家会话（状态机 + 命名）──────────────────────── */
+
+	/**
+	 * 拉一次宿主侧的专家会话清单（含 status）。
+	 *
+	 * 与 `listSessions()`（DSH 会话投影，用于"语音去向"）是**两件事**：
+	 * 那个是"小凤的语音投到哪个 DSH 会话"，这个是"每位专家名下有哪些会话、
+	 * 各自什么状态"。需求④只关心后者，所以单独一个读写面。
+	 *
+	 * @returns `{ [workerId]: {sessions, activeSessionId, digestCount} }`；失败返回 `{}`。
+	 */
+	async refreshExpertSessions() {
+		try {
+			const data = await listSessions();
+			const sessions = data?.sessions ?? {};
+			// 存进快照，界面重渲染时直接可用（不必每次渲染都发请求）。
+			this.patch({ expertSessions: sessions });
+			return sessions;
+		} catch (error) {
+			warn("拉取专家会话失败", error?.message ?? error);
+			return this.snapshot.expertSessions ?? {};
+		}
+	}
+
+	/**
+	 * V2.4 需求④：改某个专家会话的状态（**用户确认后才调**）。
+	 *
+	 * 面板上点按钮 → 这里 → 宿主 `/sessions/<id>/status`。改完顺手刷新列表，
+	 * 让界面立刻反映"原来那个活跃的变成挂起了"。
+	 *
+	 * @param workerId - 专家 id。
+	 * @param sessionId - 目标会话。
+	 * @param status - `active` / `suspended` / `finished`。
+	 * @returns 宿主返回的结果对象。
+	 */
+	async setExpertSessionStatus(workerId, sessionId, status) {
+		let result;
+		try {
+			result = await setSessionStatus(workerId, sessionId, status);
+		} catch (error) {
+			warn("设置会话状态失败", error?.message ?? error);
+			result = { ok: false, error: String(error?.message ?? error) };
+		}
+		const worker = (this.config.routing?.workers ?? []).find((w) => w.id === workerId);
+		const label = worker?.label ?? workerId;
+		const word = { active: "活跃", suspended: "挂起", finished: "完结" }[status] ?? status;
+		this.notice(
+			result?.ok === true ? `已把${label}的这个会话设为${word}。` : formatSessionSpeech(result, "session-status"),
+			result?.ok === true ? "info" : "warn",
+		);
+		await this.refreshExpertSessions();
+		return result;
+	}
+
+	/**
+	 * V2.4 需求③：手动给专家会话改名。
+	 * @returns 宿主返回的结果对象。
+	 */
+	async renameExpertSession(workerId, sessionId, label) {
+		let result;
+		try {
+			result = await renameSession(workerId, sessionId, label);
+		} catch (error) {
+			warn("会话改名失败", error?.message ?? error);
+			result = { ok: false, error: String(error?.message ?? error) };
+		}
+		if (result?.ok !== true) this.notice("改名没成功。", "warn");
+		await this.refreshExpertSessions();
+		return result;
 	}
 
 	/**

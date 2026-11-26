@@ -153,8 +153,25 @@ const SESSION_LIST_RE = /(列出|查看|看看|显示|报一下|说下|有哪些
 const SESSION_CREATE_RE = /(?:给\s*(.+?)\s*)?(?:新建|新开|开个|开一个|开|创建)\s*(?:一个)?\s*(.+?)\s*(?:的)?\s*新?会话/;
 /** 切换会话：「切换到小因会话」「用小因的会话2」「切小因会话」。 */
 const SESSION_SWITCH_RE = /(?:切换|切到|切|改用|用)\s*(?:到)?\s*(.+?)\s*(?:的)?\s*会话\s*([0-9一二三四五六七八九十]+)?/;
-/** 关闭会话：「关闭小因会话」「删掉小因的会话2」。 */
+/** 关闭会话：「关闭小因会话」「删掉小因的会话2」。**注意：关闭 = 删除**。 */
 const SESSION_CLOSE_RE = /(?:关闭|关掉|删掉|删除|移除)\s*(?:那个)?\s*(.+?)\s*(?:的)?\s*会话\s*([0-9一二三四五六七八九十]+)?/;
+/**
+ * V2.4 需求④：改会话状态（活跃 / 挂起 / 完结）。
+ *
+ * 与「关闭」是两件事：关闭把会话从列表里删掉；状态是**保留**会话只换标记。
+ * 用户两种语序都要认，所以有"前置动词"和"后置动词"两条正则：
+ *   - 前置：「挂起小因的会话2」「完结基因会话」
+ *   - 后置：「把小因的会话2设为挂起」「基因的会话改成活跃」
+ */
+const SESSION_STATUS_PRE_RE = /(激活|启用|恢复|挂起|暂停|完结|结束|归档)\s*(?:掉|一下|下)?\s*(?:那个)?\s*(.+?)\s*(?:的)?\s*会话\s*([0-9一二三四五六七八九十]+)?/;
+const SESSION_STATUS_POST_RE = /(.+?)\s*(?:的)?\s*会话\s*([0-9一二三四五六七八九十]+)?\s*(?:设为|设成|改成|改为|标记为|标记成|变成)\s*(激活|活跃|启用|恢复|挂起|暂停|完结|结束|归档|完成)/;
+
+/** 状态词 → 内部状态值。 */
+const STATUS_WORDS = {
+	激活: "active", 活跃: "active", 启用: "active", 恢复: "active",
+	挂起: "suspended", 暂停: "suspended",
+	完结: "finished", 结束: "finished", 归档: "finished", 完成: "finished",
+};
 
 /** 中文数字转阿拉伯数字（会话序号用）。 */
 function cnNumber(text) {
@@ -166,11 +183,20 @@ function cnNumber(text) {
 }
 
 /**
- * 解析一条专家会话命令（V1.8，纯函数）。
+ * 解析一条专家会话命令（V1.8；V2.4 加状态控制，纯函数）。
+ *
+ * 判定顺序很关键，**不能随意调换**：
+ *   1. `session-list` —— "列出会话" 里含"会话"，放后面会被别的正则吃掉；
+ *   2. `session-status` —— "挂起X会话" 与 "关闭X会话" 都是动词+会话，
+ *      但表述完全不同，先判状态（状态词很特征化），避免"完结"被当成"关闭"；
+ *   3. `session-close` —— 关闭 = **删除**，语义最重，要在"新建"之前判；
+ *   4. `session-switch` —— "切换到X会话"；
+ *   5. `session-create` —— 兜底："给X开个会话"。
  *
  * @param raw - 原始转录。
- * @returns `{kind:"session-list"}` / `{kind:"session-create", expertLabel, label?}` /
- *   `{kind:"session-switch"|"session-close", expertLabel, index?}` / `null`。
+ * @returns `{kind:"session-list"}` / `{kind:"session-create", expertLabel}` /
+ *   `{kind:"session-switch"|"session-close", expertLabel, index?}` /
+ *   `{kind:"session-status", expertLabel, index?, status}` / `null`。
  */
 export function parseSessionCommand(raw) {
 	if (typeof raw !== "string") return null;
@@ -179,6 +205,26 @@ export function parseSessionCommand(raw) {
 
 	// 列出会话优先。
 	if (SESSION_LIST_RE.test(text)) return { kind: "session-list" };
+
+	// 状态控制（需求④）。前置/后置两种语序都认。
+	const postMatch = text.match(SESSION_STATUS_POST_RE);
+	if (postMatch) {
+		const label = cleanName(postMatch[1] ?? "");
+		const status = STATUS_WORDS[postMatch[3] ?? ""];
+		if (label !== "" && status !== undefined) {
+			return { kind: "session-status", expertLabel: label, index: cnNumber(postMatch[2]) || 0, status };
+		}
+	}
+	const preMatch = text.match(SESSION_STATUS_PRE_RE);
+	if (preMatch) {
+		const status = STATUS_WORDS[preMatch[1] ?? ""];
+		// 第 2 组可能是专家名，也可能是"这位专家"之类的残留 —— cleanName 后为空就丢。
+		let label = cleanName(preMatch[2] ?? "");
+		if (label === "" || /^(个|一个|这位|那个|当前|现在的?)$/.test(label)) return null;
+		if (status !== undefined) {
+			return { kind: "session-status", expertLabel: label, index: cnNumber(preMatch[3]) || 0, status };
+		}
+	}
 
 	// 关闭/切换要放在"新建"之前判（"关闭X会话"不该被开会话正则吃）。
 	const closeMatch = text.match(SESSION_CLOSE_RE);
@@ -213,11 +259,15 @@ export function formatSessionSpeech(result, kind) {
 		"session-not-found": "没找到这个会话。",
 		"session-limit-reached": "这位专家的会话太多了，先关掉一个再开。",
 		"last-session": "这是最后一个会话，得留一个。",
+		"invalid-status": "状态只支持活跃、挂起、完结三种。",
+		"session-agent-unavailable": "这个会话的实例还没就绪，稍等一下再派任务，或者先激活另一个会话。",
+		"task-empty": "没听清任务内容，请再说一遍。",
 	};
 	return map[error] ?? (
 		kind === "session-create" ? "没开成会话，请按「给专家名开个会话」再说一遍。" :
 		kind === "session-switch" ? "没切成，请说清楚专家和会话序号。" :
 		kind === "session-close" ? "没关成，请说清楚要关哪个会话。" :
+		kind === "session-status" ? "没改成功，请说「把某专家的会话设为挂起」这样。" :
 		"没查到会话。"
 	);
 }
