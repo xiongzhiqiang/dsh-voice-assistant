@@ -238,6 +238,24 @@ ${indent(body, 2)}
 
 function main() {
 	const { out, count } = build();
+
+	// ── 产物语法自校验（2026-11-26 补）─────────────────────────────────
+	// 起因：styles.js 是**一个模板字符串**，注释里写了反引号 → 提前闭合 →
+	// 属性名被当 JS 解析 → `SyntaxError: Unexpected identifier 'max'`。
+	// 这类错误只在浏览器里表现为"整站白屏 + Failed to load plugins"，
+	// 纯逻辑单测全绿也照样发生（构建产物是唯一被 DSH 加载的东西）。
+	//
+	// classic script 没有 import/export，因此 `new Function` 能直接编译它：
+	// 编译不过就说明产物铁定起不来，宁可构建失败，也不要写出一个白屏的包。
+	try {
+		new Function(out);
+	} catch (error) {
+		throw new Error(
+			`build: 产物语法不合法，已拒绝写盘 —— ${String(error?.message ?? error)}\n` +
+				"  常见原因：src/client/ui/styles.js 的模板字符串（CSS 段）里出现了反引号。",
+		);
+	}
+
 	if (argv.has("--check")) {
 		console.log(`构建校验通过：模块 ${count} 个，产物 ${out.length} 字节（未写盘）`);
 		return;

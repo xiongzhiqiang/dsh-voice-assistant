@@ -64,6 +64,10 @@ const domNodes = new Map();
 /** 极简 document 替身：installStyles 只需要这几个方法。 */
 const documentStub = {
 	getElementById: (id) => domNodes.get(id) ?? null,
+	// V1.6 起卸载时要清掉兜底挂载的宿主节点（`[id^="xfv-fallback-host"]`）。
+	// 少了这个会报 `document.querySelectorAll is not a function` —— 那是**替身缺口**，
+	// 不是产品 bug；补上才能测到真正的卸载清理。
+	querySelectorAll: () => [],
 	createElement: () => {
 		const node = {
 			id: "",
